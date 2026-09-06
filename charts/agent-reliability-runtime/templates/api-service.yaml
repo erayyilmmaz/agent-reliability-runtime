@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agent-reliability-runtime.fullname" . }}-api
+  labels:
+    {{- include "agent-reliability-runtime.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: {{ .Values.api.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.api.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "agent-reliability-runtime.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api

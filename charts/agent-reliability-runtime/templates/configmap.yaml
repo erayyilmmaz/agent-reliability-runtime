@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agent-reliability-runtime.fullname" . }}-config
+  labels:
+    {{- include "agent-reliability-runtime.labels" . | nindent 4 }}
+data:
+  APP_AUTH_MODE: {{ .Values.config.authMode | quote }}
+  APP_OPENAI_BASE_URL: {{ .Values.config.openaiBaseUrl | quote }}
+  APP_OPENAI_DEFAULT_MODEL: {{ .Values.config.openaiDefaultModel | quote }}
+  APP_WORKER_CONCURRENCY: {{ .Values.config.workerConcurrency | quote }}
+  APP_PROVIDER_TIMEOUT_SECONDS: {{ .Values.config.providerTimeoutSeconds | quote }}
+  APP_RETRY_MAX_ATTEMPTS: {{ .Values.config.retryMaxAttempts | quote }}
+  APP_RETRY_BASE_DELAY_SECONDS: {{ .Values.config.retryBaseDelaySeconds | quote }}
+  APP_RETRY_MAX_BACKOFF_SECONDS: {{ .Values.config.retryMaxBackoffSeconds | quote }}
+  APP_RETRY_ATTEMPT_TIMEOUT_SECONDS: {{ .Values.config.retryAttemptTimeoutSeconds | quote }}
+  APP_RETRY_SCHEDULER_POLL_INTERVAL_SECONDS: {{ .Values.config.retrySchedulerPollIntervalSeconds | quote }}
+  APP_OUTBOX_BATCH_SIZE: {{ .Values.config.outboxBatchSize | quote }}
+  APP_OUTBOX_POLL_INTERVAL_SECONDS: {{ .Values.config.outboxPollIntervalSeconds | quote }}
+  APP_OUTBOX_PUBLISH_TIMEOUT_SECONDS: {{ .Values.config.outboxPublishTimeoutSeconds | quote }}
+  APP_EXECUTION_LEASE_SECONDS: {{ .Values.config.executionLeaseSeconds | quote }}
+  APP_LEASE_RECOVERY_POLL_INTERVAL_SECONDS: {{ .Values.config.leaseRecoveryPollIntervalSeconds | quote }}
+  APP_OTEL_ENABLED: {{ .Values.config.otelEnabled | quote }}
+  APP_OTEL_ENDPOINT: {{ .Values.config.otelEndpoint | quote }}
+  APP_LOG_LEVEL: {{ .Values.config.logLevel | quote }}

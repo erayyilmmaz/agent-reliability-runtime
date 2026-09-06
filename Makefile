@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help dev infra test lint typecheck format-check coverage migrate smoke down
+.PHONY: help dev infra test lint typecheck format-check coverage migrate smoke helm-lint down
 
 help:
 	@echo "make dev          Build and start the local runtime and infrastructure"
@@ -11,6 +11,7 @@ help:
 	@echo "make coverage     Produce terminal coverage for the runtime package"
 	@echo "make migrate      Apply Alembic migrations through the API image"
 	@echo "make smoke        Verify the full Docker Compose deterministic demo"
+	@echo "make helm-lint    Lint and render the Helm chart"
 	@echo "make down         Stop and remove local containers"
 
 dev:
@@ -37,6 +38,10 @@ migrate:
 
 smoke:
 	bash scripts/compose-smoke.sh
+
+helm-lint:
+	helm lint charts/agent-reliability-runtime
+	helm template arr charts/agent-reliability-runtime --namespace arr
 
 down:
 	docker compose down --remove-orphans

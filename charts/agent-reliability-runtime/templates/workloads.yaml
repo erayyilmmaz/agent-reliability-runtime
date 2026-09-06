@@ -1,0 +1,76 @@
+{{- define "agent-reliability-runtime.workload" -}}
+{{- $root := .root -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent-reliability-runtime.fullname" $root }}-{{ .component }}
+  labels:
+    {{- include "agent-reliability-runtime.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ .component }}
+spec:
+  replicas: {{ .replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "agent-reliability-runtime.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ .component }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-reliability-runtime.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ .component }}
+    spec:
+      serviceAccountName: {{ include "agent-reliability-runtime.serviceAccountName" $root }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .component }}
+          image: "{{ $root.Values.image.repository }}:{{ default $root.Chart.AppVersion $root.Values.image.tag }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command:
+            {{- toYaml .command | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "agent-reliability-runtime.fullname" $root }}-config
+            - secretRef:
+                name: {{ required "existingSecret.name is required" $root.Values.existingSecret.name }}
+          resources:
+            {{- toYaml .resources | nindent 12 }}
+          {{- if .api }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          {{- else }}
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          {{- end }}
+{{ end }}
+{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "api" "command" (list "agent-runtime-api") "replicaCount" .Values.api.replicaCount "resources" .Values.api.resources "api" true) }}
+---
+{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "worker" "command" (list "agent-runtime-worker") "replicaCount" .Values.worker.replicaCount "resources" .Values.worker.resources "api" false) }}
+---
+{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "dispatcher" "command" (list "agent-runtime-dispatcher") "replicaCount" .Values.dispatcher.replicaCount "resources" .Values.dispatcher.resources "api" false) }}
+---
+{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "scheduler" "command" (list "agent-runtime-recovery") "replicaCount" .Values.scheduler.replicaCount "resources" .Values.scheduler.resources "api" false) }}

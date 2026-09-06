@@ -6,6 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN groupadd --system runtime \
+    && useradd --system --gid runtime --home-dir /app --shell /usr/sbin/nologin runtime
+
 COPY --from=ghcr.io/astral-sh/uv:0.6.3 /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
@@ -17,3 +20,6 @@ COPY migrations ./migrations
 RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
+
+RUN chown -R runtime:runtime /app
+USER runtime

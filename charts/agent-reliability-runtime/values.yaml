@@ -1,0 +1,90 @@
+image:
+  repository: agent-reliability-runtime
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# This chart never creates credential values. Create this Secret outside Helm
+# (for example through External Secrets or kubectl) before installation.
+existingSecret:
+  name: agent-reliability-runtime-secrets
+
+config:
+  authMode: api_key
+  openaiBaseUrl: https://api.openai.com/v1
+  openaiDefaultModel: gpt-5
+  workerConcurrency: 4
+  providerTimeoutSeconds: 60
+  retryMaxAttempts: 3
+  retryBaseDelaySeconds: 1
+  retryMaxBackoffSeconds: 60
+  retryAttemptTimeoutSeconds: 60
+  retrySchedulerPollIntervalSeconds: 1
+  outboxBatchSize: 50
+  outboxPollIntervalSeconds: 1
+  outboxPublishTimeoutSeconds: 10
+  executionLeaseSeconds: 120
+  leaseRecoveryPollIntervalSeconds: 5
+  otelEnabled: false
+  otelEndpoint: http://otel-collector:4318
+  logLevel: INFO
+
+api:
+  replicaCount: 2
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+worker:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+dispatcher:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+scheduler:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+migration:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 300

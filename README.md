@@ -58,6 +58,7 @@ Compose smoke demo, critical failure matrix, and contributor delivery material.
 - OpenTelemetry, Prometheus, Grafana, structured JSON logs
 - pytest, pytest-asyncio, deterministic fake providers
 - Docker, Docker Compose, GitHub Actions
+- Kubernetes, Helm (API and worker processes scale independently)
 
 ## Local development
 
@@ -84,6 +85,14 @@ make down
 ```
 
 The API also exposes `GET /healthz` for process-level health checks.
+
+## Kubernetes deployment
+
+The Helm chart deploys the API, worker, dispatcher, scheduler and migration Job
+as separate workloads. Configuration is a ConfigMap; connection URLs and API
+credentials are supplied only through a pre-existing Kubernetes Secret. See the
+[kind/k3d deployment guide](docs/deployment/kubernetes.md) for a local cluster
+demo, independent worker scaling and probe verification.
 
 ## Five-minute credentials-free demo
 
