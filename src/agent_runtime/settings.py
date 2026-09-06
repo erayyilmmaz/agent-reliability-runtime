@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -21,7 +22,10 @@ class Settings(BaseSettings):
     openai_base_url: AnyUrl = AnyUrl("https://api.openai.com/v1")
     openai_default_model: str = Field(default="gpt-5", min_length=1, max_length=128)
     auth_mode: Literal["disabled", "api_key"] = "disabled"
-    auth_token: SecretStr | None = None
+    auth_api_key_hash: SecretStr | None = None
+    rate_limit_requests: int = Field(default=60, ge=1, le=10_000)
+    rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
+    max_request_bytes: int = Field(default=131_072, ge=1_024, le=1_048_576)
     worker_concurrency: int = Field(default=4, ge=1, le=128)
     provider_timeout_seconds: int = Field(default=60, ge=1, le=600)
     retry_max_attempts: int = Field(default=3, ge=1, le=20)
@@ -59,15 +63,16 @@ class Settings(BaseSettings):
             raise ValueError("rabbitmq_url must use amqp or amqps")
         return value
 
-    @field_validator("auth_token")
+    @field_validator("auth_api_key_hash")
     @classmethod
-    def api_key_mode_requires_token(cls, value: SecretStr | None, info: object) -> SecretStr | None:
-        # Cross-field validation is completed in model_post_init below.
+    def api_key_hash_must_be_sha256(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and re.fullmatch(r"[0-9a-f]{64}", value.get_secret_value()) is None:
+            raise ValueError("auth_api_key_hash must be a lowercase SHA-256 hex digest")
         return value
 
     def model_post_init(self, __context: object) -> None:
-        if self.auth_mode == "api_key" and self.auth_token is None:
-            raise ValueError("auth_token is required when auth_mode is api_key")
+        if self.auth_mode == "api_key" and self.auth_api_key_hash is None:
+            raise ValueError("auth_api_key_hash is required when auth_mode is api_key")
 
 
 @lru_cache

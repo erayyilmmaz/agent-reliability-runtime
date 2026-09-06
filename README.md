@@ -180,3 +180,19 @@ deep-copies the original immutable input and resolved policy snapshot, writes
 audit events to both histories, and queues the new run through the regular
 transactional outbox. Repeating the same replay request with the same client
 and key returns that replay rather than creating another execution.
+
+## API security boundary
+
+Production uses `APP_AUTH_MODE=api_key` and a static SHA-256 digest in
+`APP_AUTH_API_KEY_HASH`; the raw API key exists only at the caller. Send it in
+`X-API-Key` or `Authorization: Bearer <key>`, alongside `X-Client-Id`. Missing
+credentials return `401`; invalid credentials return `403`. The configured
+Redis fixed-window limit applies across API instances per hashed client ID and
+returns `429` before a run is persisted or a provider can be called.
+
+Security audit records are append-only PostgreSQL facts for authentication and
+rate-limit outcomes. They contain only controlled event metadata, a client ID,
+and a credential fingerprint—never an API key, header, request body, provider
+response, stack trace, or configuration secret. Local Docker development stays
+explicitly in `disabled` auth mode; enable API-key mode through a local secret
+manager or deployment environment before exposing the API.

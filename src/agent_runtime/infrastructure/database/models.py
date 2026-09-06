@@ -190,3 +190,19 @@ class Evaluation(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     run: Mapped[Run] = relationship(back_populates="evaluations")
+
+
+class SecurityAuditEvent(Base):
+    """Append-only security facts; raw keys, headers, and payloads are intentionally absent."""
+
+    __tablename__ = "security_audit_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    client_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    credential_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

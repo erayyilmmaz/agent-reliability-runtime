@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from agent_runtime.domain.states import EvaluationStatus, ExecutionStatus
 
 MAX_INPUT_BYTES = 65_536
+MAX_REQUEST_BYTES = 131_072
 
 
 class CreateRunRequest(BaseModel):
@@ -22,6 +23,8 @@ class CreateRunRequest(BaseModel):
         encoded_input = self.model_dump_json(include={"input"}).encode("utf-8")
         if len(encoded_input) > MAX_INPUT_BYTES:
             raise ValueError(f"input must not exceed {MAX_INPUT_BYTES} bytes")
+        if len(self.model_dump_json().encode("utf-8")) > MAX_REQUEST_BYTES:
+            raise ValueError(f"request must not exceed {MAX_REQUEST_BYTES} bytes")
         return self
 
 

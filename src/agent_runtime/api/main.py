@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -38,7 +39,20 @@ from agent_runtime.infrastructure.database.session import (
     create_database_engine,
     create_session_factory,
 )
+from agent_runtime.infrastructure.redis.rate_limiter import (
+    NoopRateLimiter,
+    RateLimiter,
+    RateLimitUnavailable,
+    RedisFixedWindowRateLimiter,
+)
 from agent_runtime.observability.telemetry import extract_trace_context, get_tracer
+from agent_runtime.security import (
+    NoopSecurityAuditSink,
+    SecurityAuditRecord,
+    SecurityAuditSink,
+    SqlAlchemySecurityAuditSink,
+    authenticate_api_key,
+)
 from agent_runtime.settings import Settings, get_settings
 
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,254}$")
@@ -116,25 +130,166 @@ def _get_service(request: Request) -> RunSubmissionService:
 
 
 def create_app(
-    settings: Settings | None = None, run_service: RunSubmissionService | None = None
+    settings: Settings | None = None,
+    run_service: RunSubmissionService | None = None,
+    rate_limiter: RateLimiter | None = None,
+    audit_sink: SecurityAuditSink | None = None,
 ) -> FastAPI:
     """Create the HTTP process without initializing workers or providers."""
 
     runtime_settings = settings or get_settings()
     engine: AsyncEngine | None = None
+    owns_rate_limiter = rate_limiter is None
     if run_service is None:
         engine = create_database_engine(runtime_settings)
-        run_service = SqlAlchemyRunService(create_session_factory(engine))
+        session_factory = create_session_factory(engine)
+        run_service = SqlAlchemyRunService(session_factory)
+        audit_sink = audit_sink or SqlAlchemySecurityAuditSink(session_factory)
+    else:
+        audit_sink = audit_sink or NoopSecurityAuditSink()
+    if rate_limiter is None:
+        rate_limiter = (
+            RedisFixedWindowRateLimiter(
+                redis_url=str(runtime_settings.redis_url),
+                limit=runtime_settings.rate_limit_requests,
+                window_seconds=runtime_settings.rate_limit_window_seconds,
+            )
+            if runtime_settings.auth_mode == "api_key"
+            else NoopRateLimiter()
+        )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
+        if owns_rate_limiter:
+            await rate_limiter.close()
         if engine is not None:
             await engine.dispose()
 
     app = FastAPI(title="Agent Reliability Runtime", version="0.1.0", lifespan=lifespan)
     app.state.settings = runtime_settings
     app.state.run_service = run_service
+
+    async def write_security_audit(
+        *,
+        event_type: str,
+        outcome: str,
+        reason: str,
+        client_id: str | None,
+        credential_fingerprint: str | None,
+    ) -> None:
+        try:
+            await audit_sink.record(
+                SecurityAuditRecord(
+                    event_type=event_type,
+                    outcome=outcome,
+                    reason=reason,
+                    client_id=client_id,
+                    credential_fingerprint=credential_fingerprint,
+                )
+            )
+        except Exception:
+            logging.getLogger(__name__).error(
+                "security audit persistence failed",
+                extra={
+                    "event": "SECURITY_AUDIT_PERSIST_FAILED",
+                    "error_code": "AUDIT_WRITE_FAILED",
+                },
+            )
+
+    @app.middleware("http")
+    async def enforce_security_boundary(request: Request, call_next: Any) -> Any:
+        if not request.url.path.startswith("/v1/"):
+            return await call_next(request)
+        client_id = request.headers.get("X-Client-Id")
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                is_oversized = int(content_length) > runtime_settings.max_request_bytes
+            except ValueError:
+                is_oversized = False
+            if is_oversized:
+                await write_security_audit(
+                    event_type="REQUEST_REJECTED",
+                    outcome="DENIED",
+                    reason="REQUEST_TOO_LARGE",
+                    client_id=client_id,
+                    credential_fingerprint=None,
+                )
+                return _security_error(
+                    status.HTTP_413_CONTENT_TOO_LARGE,
+                    "REQUEST_TOO_LARGE",
+                    "Request body exceeds the configured limit.",
+                )
+
+        authentication = authenticate_api_key(
+            settings=runtime_settings,
+            x_api_key=request.headers.get("X-API-Key"),
+            authorization=request.headers.get("Authorization"),
+        )
+        if not authentication.authenticated:
+            status_code = (
+                status.HTTP_401_UNAUTHORIZED
+                if authentication.failure_code == "AUTHENTICATION_REQUIRED"
+                else status.HTTP_403_FORBIDDEN
+            )
+            await write_security_audit(
+                event_type="AUTHENTICATION",
+                outcome="DENIED",
+                reason=authentication.failure_code or "INVALID_CREDENTIAL",
+                client_id=client_id,
+                credential_fingerprint=authentication.credential_fingerprint,
+            )
+            return _security_error(
+                status_code,
+                authentication.failure_code or "INVALID_CREDENTIAL",
+                (
+                    "Authentication is required."
+                    if status_code == 401
+                    else "Credential is not accepted."
+                ),
+            )
+
+        if runtime_settings.auth_mode == "api_key" and client_id is not None and client_id.strip():
+            try:
+                decision = await rate_limiter.check(client_id.strip())
+            except RateLimitUnavailable:
+                await write_security_audit(
+                    event_type="RATE_LIMIT",
+                    outcome="ERROR",
+                    reason="RATE_LIMIT_UNAVAILABLE",
+                    client_id=client_id.strip(),
+                    credential_fingerprint=authentication.credential_fingerprint,
+                )
+                return _security_error(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "RATE_LIMIT_UNAVAILABLE",
+                    "Request rate limiting is temporarily unavailable.",
+                )
+            if not decision.allowed:
+                await write_security_audit(
+                    event_type="RATE_LIMIT",
+                    outcome="DENIED",
+                    reason="RATE_LIMIT_EXCEEDED",
+                    client_id=client_id.strip(),
+                    credential_fingerprint=authentication.credential_fingerprint,
+                )
+                return _security_error(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    "RATE_LIMIT_EXCEEDED",
+                    "Request rate limit exceeded.",
+                    headers={"Retry-After": str(decision.retry_after_seconds)},
+                )
+
+        if runtime_settings.auth_mode == "api_key":
+            await write_security_audit(
+                event_type="AUTHENTICATION",
+                outcome="ALLOWED",
+                reason="AUTHENTICATED",
+                client_id=client_id.strip() if client_id and client_id.strip() else None,
+                credential_fingerprint=authentication.credential_fingerprint,
+            )
+        return await call_next(request)
 
     @app.middleware("http")
     async def trace_http_request(request: Request, call_next: Any) -> Any:
@@ -173,6 +328,18 @@ def create_app(
                     "details": exc.errors(),
                 }
             },
+        )
+
+    @app.exception_handler(Exception)
+    async def internal_error_handler(_: Request, exc: Exception) -> JSONResponse:
+        logging.getLogger(__name__).error(
+            "unhandled api error",
+            extra={"event": "API_UNHANDLED_ERROR", "error_code": type(exc).__name__},
+        )
+        return _security_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "An internal error occurred.",
         )
 
     @app.get("/healthz", tags=["operations"])
@@ -400,6 +567,16 @@ def _required_client_id(client_id: str | None) -> str:
             message="X-Client-Id header is required until authentication is introduced.",
         )
     return client_id.strip()
+
+
+def _security_error(
+    status_code: int, code: str, message: str, headers: dict[str, str] | None = None
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"code": code, "message": message}},
+        headers=headers,
+    )
 
 
 app = create_app()

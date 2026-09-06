@@ -1,4 +1,4 @@
-from agent_runtime.infrastructure.database.models import Base, Evaluation, Run
+from agent_runtime.infrastructure.database.models import Base, Evaluation, Run, SecurityAuditEvent
 
 
 def test_metadata_contains_every_durable_runtime_entity() -> None:
@@ -8,6 +8,7 @@ def test_metadata_contains_every_durable_runtime_entity() -> None:
         "run_events",
         "outbox_events",
         "evaluations",
+        "security_audit_events",
     }
 
 
@@ -39,3 +40,15 @@ def test_run_persists_trace_context_for_retries_and_fallbacks() -> None:
 
 def test_evaluation_has_a_completion_timestamp_for_its_lifecycle() -> None:
     assert "completed_at" in Evaluation.__table__.c
+
+
+def test_security_audit_excludes_request_and_secret_columns() -> None:
+    assert set(SecurityAuditEvent.__table__.c.keys()) == {
+        "id",
+        "event_type",
+        "outcome",
+        "reason",
+        "client_id",
+        "credential_fingerprint",
+        "created_at",
+    }

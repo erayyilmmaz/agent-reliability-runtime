@@ -31,9 +31,14 @@ def test_settings_reject_invalid_configuration(field: str, value: str | int) -> 
         Settings(**{field: value})
 
 
-def test_api_key_mode_requires_token() -> None:
-    with pytest.raises(ValidationError, match="auth_token"):
+def test_api_key_mode_requires_credential_hash() -> None:
+    with pytest.raises(ValidationError, match="auth_api_key_hash"):
         Settings(auth_mode="api_key")
+
+
+def test_api_key_mode_rejects_a_non_hash_configuration() -> None:
+    with pytest.raises(ValidationError, match="SHA-256"):
+        Settings(auth_mode="api_key", auth_api_key_hash="raw-secret")
 
 
 def test_openai_settings_keep_key_optional_until_provider_is_selected() -> None:
