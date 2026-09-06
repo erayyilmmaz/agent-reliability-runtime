@@ -19,7 +19,6 @@ spec:
         app.kubernetes.io/component: migration
     spec:
       restartPolicy: Never
-      serviceAccountName: {{ include "agent-reliability-runtime.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -30,7 +29,5 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["alembic", "upgrade", "head"]
           envFrom:
-            - configMapRef:
-                name: {{ include "agent-reliability-runtime.fullname" . }}-config
             - secretRef:
                 name: {{ required "existingSecret.name is required" .Values.existingSecret.name }}
