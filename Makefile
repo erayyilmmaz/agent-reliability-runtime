@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help dev infra test lint typecheck format-check coverage migrate smoke helm-lint terraform-fmt terraform-validate down
+.PHONY: help dev infra test lint typecheck format-check coverage migrate smoke recruiter-demo helm-lint terraform-fmt terraform-validate down
 
 help:
 	@echo "make dev          Build and start the local runtime and infrastructure"
@@ -11,6 +11,7 @@ help:
 	@echo "make coverage     Produce terminal coverage for the runtime package"
 	@echo "make migrate      Apply Alembic migrations through the API image"
 	@echo "make smoke        Verify the full Docker Compose deterministic demo"
+	@echo "make recruiter-demo Run the Python SDK recruiter tour against make dev"
 	@echo "make helm-lint    Lint and render the Helm chart"
 	@echo "make terraform-fmt Check Terraform formatting"
 	@echo "make terraform-validate Initialize without state and validate every Terraform environment"
@@ -40,6 +41,9 @@ migrate:
 
 smoke:
 	bash scripts/compose-smoke.sh
+
+recruiter-demo:
+	uv run python examples/recruiter_demo.py
 
 helm-lint:
 	helm lint charts/agent-reliability-runtime

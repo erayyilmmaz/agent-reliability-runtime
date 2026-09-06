@@ -51,6 +51,7 @@ Compose smoke demo, critical failure matrix, and contributor delivery material.
 - [ADR-0004: API security boundary](docs/adr/0004-api-security-boundary.md)
 - [Policy-aware provider routing](docs/architecture/routing-policy.md)
 - [Evaluation regression suite](docs/architecture/evaluation-regression-suite.md)
+- [10–15 minute recruiter demo](docs/recruiter-demo.md)
 - [Critical failure matrix](docs/testing/failure-matrix.md)
 
 ## V0 technology direction
@@ -87,6 +88,16 @@ make down
 ```
 
 The API also exposes `GET /healthz` for process-level health checks.
+
+## Recruiter demo and Python client SDK
+
+Start `make dev` in one terminal, then run `make recruiter-demo` in another.
+The [recruiter demo](docs/recruiter-demo.md) uses the public
+`AgentRuntimeClient` to submit a run, wait for it, and inspect durable attempts
+and events. It then points to the Grafana dashboard and verified failure matrix.
+The SDK exposes `run`, `get_run`, `replay`, attempt/event reads, and
+`wait_for_terminal`; it sends `X-Client-Id`, idempotency, and optional API-key
+headers consistently.
 
 ## Kubernetes deployment
 
