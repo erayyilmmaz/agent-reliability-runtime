@@ -3,6 +3,7 @@ set -euo pipefail
 
 arr_health_url="http://localhost:8000/healthz"
 arr_api_url="http://localhost:8000/v1/runs"
+arr_regression_url="http://localhost:8000/v1/evaluation-regressions"
 arr_run_key="compose-smoke-$(date +%s)"
 
 cleanup() {
@@ -57,6 +58,12 @@ arr_evaluation=$(curl --fail --silent --show-error -X POST "$arr_api_url/$arr_ru
   --data '{"rules":[{"type":"non_empty","path":"missing"}]}')
 printf '%s' "$arr_evaluation" | grep -q '"status":"FAILED"'
 
+arr_regression=$(curl --fail --silent --show-error -X POST "$arr_regression_url" \
+  -H 'Content-Type: application/json' \
+  --data '{"dataset":{"dataset_id":"compose-smoke","version":"1.0.0","cases":[{"case_id":"prompt-is-preserved","input":{"prompt":"ready"},"rules":[{"type":"rule","path":"accepted_input.prompt","operator":"equals","value":"ready"}]}]},"baseline":{"provider":"deterministic"},"candidate":{"provider":"deterministic"}}')
+printf '%s' "$arr_regression" | grep -q '"schema_version":"evaluation-regression-report.v1"'
+printf '%s' "$arr_regression" | grep -q '"passed":true'
+
 arr_replay_response=$(curl --fail --silent --show-error -X POST "$arr_api_url/$arr_run_id/replay" \
   -H 'X-Client-Id: compose-smoke' \
   -H "Idempotency-Key: $arr_run_key-replay")
@@ -65,4 +72,4 @@ test -n "$arr_replay_id"
 test "$arr_replay_id" != "$arr_run_id"
 wait_for_success "$arr_replay_id"
 
-echo "Compose smoke passed: deterministic run, duplicate, failed evaluation, and replay verified."
+echo "Compose smoke passed: run, duplicate, failed evaluation, regression suite, and replay verified."

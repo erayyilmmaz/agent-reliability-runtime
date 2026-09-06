@@ -73,6 +73,49 @@ class EvaluateRunRequest(BaseModel):
     rules: list[dict[str, JsonValue]] = Field(min_length=1, max_length=32)
 
 
+class EvaluationRegressionCaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str = Field(min_length=1, max_length=128)
+    input: dict[str, JsonValue] = Field(min_length=1)
+    rules: list[dict[str, JsonValue]] = Field(min_length=1, max_length=32)
+
+
+class EvaluationRegressionDatasetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str = Field(min_length=1, max_length=128)
+    version: str = Field(min_length=1, max_length=64)
+    cases: list[EvaluationRegressionCaseRequest] = Field(min_length=1, max_length=100)
+
+
+class EvaluationRegressionTargetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(min_length=1, max_length=64)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    estimated_cost_microusd: int = Field(default=0, ge=0)
+
+
+class EvaluationRegressionGatesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_quality_regression_points: float = Field(default=0.0, ge=0)
+    max_latency_regression_percent: float | None = Field(default=None, ge=0)
+    max_cost_regression_percent: float | None = Field(default=None, ge=0)
+
+
+class EvaluationRegressionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset: EvaluationRegressionDatasetRequest
+    baseline: EvaluationRegressionTargetRequest
+    candidate: EvaluationRegressionTargetRequest
+    gates: EvaluationRegressionGatesRequest = Field(
+        default_factory=EvaluationRegressionGatesRequest
+    )
+
+
 class EvaluationResponse(BaseModel):
     evaluation_id: UUID
     evaluator: str

@@ -1,0 +1,14 @@
+{
+  "dataset_id": "core-provider-contract",
+  "version": "1.0.0",
+  "cases": [
+    {
+      "case_id": "deterministic-input-is-preserved",
+      "input": {"prompt": "ready"},
+      "rules": [
+        {"type": "rule", "path": "accepted_input.prompt", "operator": "equals", "value": "ready"},
+        {"type": "latency_budget", "max_ms": 100}
+      ]
+    }
+  ]
+}

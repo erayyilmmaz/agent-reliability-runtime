@@ -50,6 +50,7 @@ Compose smoke demo, critical failure matrix, and contributor delivery material.
 - [ADR-0003: run, attempt, and event records](docs/adr/0003-run-attempt-event-model.md)
 - [ADR-0004: API security boundary](docs/adr/0004-api-security-boundary.md)
 - [Policy-aware provider routing](docs/architecture/routing-policy.md)
+- [Evaluation regression suite](docs/architecture/evaluation-regression-suite.md)
 - [Critical failure matrix](docs/testing/failure-matrix.md)
 
 ## V0 technology direction
@@ -240,6 +241,14 @@ deep-copies the original immutable input and resolved policy snapshot, writes
 audit events to both histories, and queues the new run through the regular
 transactional outbox. Repeating the same replay request with the same client
 and key returns that replay rather than creating another execution.
+
+## Evaluation regression suite
+
+Use the versioned [evaluation regression suite](docs/architecture/evaluation-regression-suite.md)
+to compare a baseline and candidate provider/model on the same deterministic
+rules. It emits a machine-readable report with independent quality, latency,
+and estimated-cost deltas and can be triggered by CLI or
+`POST /v1/evaluation-regressions`.
 
 ## API security boundary
 

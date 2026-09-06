@@ -41,6 +41,7 @@ agent-runtime-api = "agent_runtime.processes:run_api"
 agent-runtime-dispatcher = "agent_runtime.processes:run_dispatcher"
 agent-runtime-worker = "agent_runtime.processes:run_worker"
 agent-runtime-recovery = "agent_runtime.processes:run_recovery"
+agent-runtime-regression = "agent_runtime.evaluation.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_runtime"]

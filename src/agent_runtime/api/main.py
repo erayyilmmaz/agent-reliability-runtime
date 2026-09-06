@@ -18,6 +18,7 @@ from agent_runtime.api.schemas import (
     CreateRunRequest,
     CreateRunResponse,
     EvaluateRunRequest,
+    EvaluationRegressionRequest,
     EvaluationResponse,
     EventResponse,
     ReplayRunResponse,
@@ -34,6 +35,12 @@ from agent_runtime.application.runs import (
     RunSubmissionService,
 )
 from agent_runtime.domain.retry import build_policy_snapshot
+from agent_runtime.evaluation.regression import (
+    EvaluationRegressionRunner,
+    ProviderModelTarget,
+    RegressionDataset,
+    RegressionGates,
+)
 from agent_runtime.infrastructure.database.run_service import SqlAlchemyRunService
 from agent_runtime.infrastructure.database.session import (
     create_database_engine,
@@ -46,6 +53,9 @@ from agent_runtime.infrastructure.redis.rate_limiter import (
     RedisFixedWindowRateLimiter,
 )
 from agent_runtime.observability.telemetry import extract_trace_context, get_tracer
+from agent_runtime.providers.deterministic import DeterministicProvider
+from agent_runtime.providers.openai_responses import OpenAIResponsesProvider
+from agent_runtime.providers.registry import ProviderRegistry
 from agent_runtime.security import (
     NoopSecurityAuditSink,
     SecurityAuditRecord,
@@ -128,6 +138,29 @@ def _validate_idempotency_key(value: str) -> str:
 
 def _get_service(request: Request) -> RunSubmissionService:
     return cast(RunSubmissionService, request.app.state.run_service)
+
+
+def _regression_runner(settings: Settings) -> EvaluationRegressionRunner:
+    return EvaluationRegressionRunner(
+        ProviderRegistry(
+            [
+                DeterministicProvider(),
+                OpenAIResponsesProvider(
+                    api_key=settings.openai_api_key,
+                    base_url=str(settings.openai_base_url),
+                    default_model=settings.openai_default_model,
+                ),
+            ]
+        )
+    )
+
+
+def _validate_regression_targets(settings: Settings, *targets: ProviderModelTarget) -> None:
+    for target in targets:
+        if target.provider not in {"deterministic", "openai"}:
+            raise ValueError(f"provider '{target.provider}' is not configured")
+        if target.provider == "openai" and settings.openai_api_key is None:
+            raise ValueError("openai target requires APP_OPENAI_API_KEY")
 
 
 def create_app(
@@ -514,6 +547,32 @@ def create_app(
                 status_code=status.HTTP_404_NOT_FOUND, code="RUN_NOT_FOUND", message=str(exc)
             ) from exc
         return [_to_evaluation_response(evaluation) for evaluation in evaluations]
+
+    @app.post(
+        "/v1/evaluation-regressions",
+        response_model=dict[str, Any],
+        responses={422: {"model": ApiErrorResponse}},
+    )
+    async def run_evaluation_regression(
+        payload: EvaluationRegressionRequest,
+    ) -> dict[str, Any]:
+        try:
+            dataset = RegressionDataset.from_mapping(payload.dataset.model_dump())
+            baseline = ProviderModelTarget(**payload.baseline.model_dump())
+            candidate = ProviderModelTarget(**payload.candidate.model_dump())
+            _validate_regression_targets(runtime_settings, baseline, candidate)
+            return await _regression_runner(runtime_settings).run(
+                dataset=dataset,
+                baseline=baseline,
+                candidate=candidate,
+                gates=RegressionGates(**payload.gates.model_dump()),
+            )
+        except ValueError as exc:
+            raise ApiProblem(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code="INVALID_REGRESSION_REQUEST",
+                message=str(exc),
+            ) from exc
 
     @app.post(
         "/v1/runs/{run_id}/replay",

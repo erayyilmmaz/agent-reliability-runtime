@@ -5,5 +5,19 @@ from agent_runtime.evaluation.engine import (
     EvaluationOutcome,
     evaluate_rules,
 )
+from agent_runtime.evaluation.regression import (
+    EvaluationRegressionRunner,
+    ProviderModelTarget,
+    RegressionDataset,
+    RegressionGates,
+)
 
-__all__ = ["EvaluationConfigurationError", "EvaluationOutcome", "evaluate_rules"]
+__all__ = [
+    "EvaluationConfigurationError",
+    "EvaluationOutcome",
+    "EvaluationRegressionRunner",
+    "ProviderModelTarget",
+    "RegressionDataset",
+    "RegressionGates",
+    "evaluate_rules",
+]

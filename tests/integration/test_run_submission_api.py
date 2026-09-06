@@ -191,6 +191,42 @@ def test_create_run_exposes_durable_routing_decision() -> None:
     assert fetched.json()["routing_decision"] == decision
 
 
+def test_evaluation_regression_api_returns_machine_readable_report() -> None:
+    service = InMemoryRunService()
+    with _client(service) as client:
+        response = client.post(
+            "/v1/evaluation-regressions",
+            json={
+                "dataset": {
+                    "dataset_id": "api-regression",
+                    "version": "1.0.0",
+                    "cases": [
+                        {
+                            "case_id": "prompt-is-preserved",
+                            "input": {"prompt": "ready"},
+                            "rules": [
+                                {
+                                    "type": "rule",
+                                    "path": "accepted_input.prompt",
+                                    "operator": "equals",
+                                    "value": "ready",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "baseline": {"provider": "deterministic"},
+                "candidate": {"provider": "deterministic"},
+            },
+        )
+
+    assert response.status_code == 200
+    report = response.json()
+    assert report["schema_version"] == "evaluation-regression-report.v1"
+    assert report["comparison"]["quality"]["delta_points"] == 0.0
+    assert report["passed"] is True
+
+
 def test_concurrent_identical_submissions_create_one_run() -> None:
     service = InMemoryRunService()
 
