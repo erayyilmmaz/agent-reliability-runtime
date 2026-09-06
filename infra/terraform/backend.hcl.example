@@ -1,0 +1,9 @@
+# Copy this file to a protected location outside this repository and replace all
+# placeholders. The Terraform HTTP backend keeps state and lock data out of Git.
+address        = "https://terraform-state.example.net/agent-reliability-runtime/sandbox"
+lock_address   = "https://terraform-state.example.net/agent-reliability-runtime/sandbox/lock"
+unlock_address = "https://terraform-state.example.net/agent-reliability-runtime/sandbox/lock"
+lock_method    = "POST"
+unlock_method  = "DELETE"
+username       = "replace-with-state-service-identity"
+password       = "replace-with-state-service-token"

@@ -94,6 +94,24 @@ credentials are supplied only through a pre-existing Kubernetes Secret. See the
 [kind/k3d deployment guide](docs/deployment/kubernetes.md) for a local cluster
 demo, independent worker scaling and probe verification.
 
+## Infrastructure as code
+
+Terraform manages a small, provider-neutral Kubernetes application-plane
+baseline: one namespace and a resource quota per `sandbox`, `staging`, or
+`production` environment. It deliberately does not create clusters or managed
+datastores without an account-owner decision. State backend settings, real
+Terraform variables, and runtime Secret values are all outside Git.
+
+```text
+Remote Terraform state -> namespace + resource quota -> pre-provisioned Secret
+                                                        |
+                                                        v
+                                               Helm runtime release
+```
+
+See the [Terraform deployment baseline](docs/deployment/terraform.md) for
+environment boundaries, state/secret handling, and the reviewed apply flow.
+
 ## Five-minute credentials-free demo
 
 The default local provider is deterministic, so this demo needs no OpenAI or

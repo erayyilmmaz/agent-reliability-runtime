@@ -1,0 +1,4 @@
+# Copy to terraform.tfvars outside Git and set the target cluster context.
+kubeconfig_path    = "/absolute/path/to/kubeconfig"
+kubeconfig_context = "sandbox-cluster-context"
+namespace          = "arr-sandbox"

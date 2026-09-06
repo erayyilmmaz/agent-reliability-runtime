@@ -1,0 +1,3 @@
+kubeconfig_path    = "/absolute/path/to/kubeconfig"
+kubeconfig_context = "production-cluster-context"
+namespace          = "arr-production"

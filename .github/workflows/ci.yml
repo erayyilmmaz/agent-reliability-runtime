@@ -48,3 +48,19 @@ jobs:
           version: v3.18.4
       - run: helm lint charts/agent-reliability-runtime
       - run: helm template arr charts/agent-reliability-runtime --namespace arr
+
+  terraform-validate:
+    needs: quality
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [sandbox, staging, production]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.6"
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive infra/terraform
+      - run: terraform -chdir=infra/terraform/environments/${{ matrix.environment }} init -backend=false -input=false
+      - run: terraform -chdir=infra/terraform/environments/${{ matrix.environment }} validate

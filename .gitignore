@@ -9,3 +9,12 @@ __pycache__/
 coverage.xml
 htmlcov/
 *.egg-info/
+
+# Terraform state, private backend settings, and per-environment inputs stay outside Git.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+crash.log
