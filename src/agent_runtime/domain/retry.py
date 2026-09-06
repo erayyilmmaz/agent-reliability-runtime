@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
 
+from agent_runtime.domain.routing import resolve_routing_decision
+
 
 class ExecutionErrorCode(StrEnum):
     PROVIDER_TIMEOUT = "PROVIDER_TIMEOUT"
@@ -95,6 +97,7 @@ def build_policy_snapshot(
     attempt_timeout_seconds: float,
     initial_backoff_seconds: float,
     max_backoff_seconds: float,
+    available_providers: set[str] | None = None,
 ) -> dict[str, Any]:
     """Merge request policy with safe defaults before it is included in the idempotency hash."""
 
@@ -103,7 +106,13 @@ def build_policy_snapshot(
     snapshot.setdefault("attempt_timeout_seconds", attempt_timeout_seconds)
     snapshot.setdefault("initial_backoff_seconds", initial_backoff_seconds)
     snapshot.setdefault("max_backoff_seconds", max_backoff_seconds)
-    snapshot.setdefault("provider_order", ["deterministic"])
+    routing_decision = resolve_routing_decision(snapshot, available_providers=available_providers)
+    snapshot["provider_order"] = routing_decision["provider_order"]
+    snapshot["routing"] = {
+        "strategy": routing_decision["strategy"],
+        "candidates": list(routing_decision["provider_order"]),
+        "decision": routing_decision,
+    }
     policy = RetryPolicy.from_snapshot(snapshot)
     return snapshot | policy.as_snapshot()
 

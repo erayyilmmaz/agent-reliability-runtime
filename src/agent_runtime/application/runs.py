@@ -32,6 +32,7 @@ class RunSnapshot:
     completed_at: datetime | None
     replay_of_run_id: uuid.UUID | None
     error_code: str | None
+    routing_decision: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

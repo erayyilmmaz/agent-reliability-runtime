@@ -75,6 +75,7 @@ def _to_run_response(run: RunSnapshot) -> RunResponse:
         completed_at=run.completed_at,
         replay_of_run_id=run.replay_of_run_id,
         error_code=run.error_code,
+        routing_decision=run.routing_decision,
     )
 
 
@@ -378,6 +379,8 @@ def create_app(
                 attempt_timeout_seconds=runtime_settings.retry_attempt_timeout_seconds,
                 initial_backoff_seconds=runtime_settings.retry_base_delay_seconds,
                 max_backoff_seconds=runtime_settings.retry_max_backoff_seconds,
+                available_providers={"deterministic"}
+                | ({"openai"} if runtime_settings.openai_api_key is not None else set()),
             )
             run, replayed = await _get_service(request).submit(
                 client_id=client_id.strip(),
@@ -399,7 +402,10 @@ def create_app(
             ) from exc
 
         return CreateRunResponse(
-            run_id=run.id, execution_status=run.execution_status, replayed=replayed
+            run_id=run.id,
+            execution_status=run.execution_status,
+            replayed=replayed,
+            routing_decision=run.routing_decision,
         )
 
     @app.get(

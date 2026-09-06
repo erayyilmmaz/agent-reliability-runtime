@@ -65,6 +65,7 @@ class InMemoryRunService:
                 completed_at=None,
                 replay_of_run_id=None,
                 error_code=None,
+                routing_decision=_routing_decision(policy_snapshot),
             )
             self._runs_by_key[key] = (request_hash, run)
             self._runs[run.id] = run
@@ -141,6 +142,14 @@ def _client(service: InMemoryRunService) -> TestClient:
     return TestClient(create_app(Settings(), run_service=service))
 
 
+def _routing_decision(policy_snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    routing = policy_snapshot.get("routing")
+    if not isinstance(routing, dict):
+        return None
+    decision = routing.get("decision")
+    return dict(decision) if isinstance(decision, dict) else None
+
+
 def test_identical_duplicate_returns_original_run() -> None:
     service = InMemoryRunService()
     with _client(service) as client:
@@ -153,6 +162,33 @@ def test_identical_duplicate_returns_original_run() -> None:
     assert first.json()["replayed"] is False
     assert duplicate.json()["replayed"] is True
     assert service.submission_count == 1
+
+
+def test_create_run_exposes_durable_routing_decision() -> None:
+    service = InMemoryRunService()
+    with _client(service) as client:
+        response = client.post(
+            "/v1/runs",
+            headers=HEADERS,
+            json={
+                "input": {"prompt": "hello"},
+                "policy": {
+                    "routing": {
+                        "strategy": "lowest_cost",
+                        "candidates": ["openai", "deterministic"],
+                    }
+                },
+            },
+        )
+        run_id = response.json()["run_id"]
+        fetched = client.get(f"/v1/runs/{run_id}", headers={"X-Client-Id": "test-client"})
+
+    assert response.status_code == 202
+    decision = response.json()["routing_decision"]
+    assert decision["selected_provider"] == "deterministic"
+    assert decision["strategy"] == "lowest_cost"
+    assert decision["metrics_source"] == "provider-catalog.v1"
+    assert fetched.json()["routing_decision"] == decision
 
 
 def test_concurrent_identical_submissions_create_one_run() -> None:

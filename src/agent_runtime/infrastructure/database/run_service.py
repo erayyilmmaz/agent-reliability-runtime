@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -30,6 +31,14 @@ from agent_runtime.infrastructure.database.models import (
 )
 from agent_runtime.observability.metrics import get_runtime_metrics
 from agent_runtime.observability.telemetry import get_tracer, inject_trace_context
+
+
+def _routing_decision(policy_snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
+    routing = policy_snapshot.get("routing")
+    if not isinstance(routing, Mapping):
+        return None
+    decision = routing.get("decision")
+    return dict(decision) if isinstance(decision, Mapping) else None
 
 
 class SqlAlchemyRunService:
@@ -90,6 +99,21 @@ class SqlAlchemyRunService:
                                 metadata_={"source": "api"},
                             )
                         )
+                        routing = policy_snapshot.get("routing")
+                        if isinstance(routing, dict) and isinstance(routing.get("decision"), dict):
+                            decision = routing["decision"]
+                            session.add(
+                                RunEvent(
+                                    run_id=run.id,
+                                    event_type="ROUTING_DECISION_RECORDED",
+                                    metadata_={
+                                        "strategy": decision.get("strategy"),
+                                        "selected_provider": decision.get("selected_provider"),
+                                        "reason": decision.get("reason"),
+                                        "metrics_source": decision.get("metrics_source"),
+                                    },
+                                )
+                            )
                         await session.flush()
                         provider = policy_snapshot.get("provider_order", ["deterministic"])[0]
                         get_runtime_metrics().run_submitted(
@@ -370,6 +394,7 @@ class SqlAlchemyRunService:
             completed_at=run.completed_at,
             replay_of_run_id=run.replay_of_run_id,
             error_code=run.error_code,
+            routing_decision=_routing_decision(run.policy_snapshot),
         )
 
     @staticmethod

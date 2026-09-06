@@ -32,6 +32,7 @@ class CreateRunResponse(BaseModel):
     run_id: UUID
     execution_status: ExecutionStatus
     replayed: bool
+    routing_decision: dict[str, JsonValue] | None = None
 
 
 class RunResponse(BaseModel):
@@ -43,6 +44,7 @@ class RunResponse(BaseModel):
     completed_at: datetime | None
     replay_of_run_id: UUID | None
     error_code: str | None
+    routing_decision: dict[str, JsonValue] | None
 
 
 class AttemptResponse(BaseModel):

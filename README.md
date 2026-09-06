@@ -49,6 +49,7 @@ Compose smoke demo, critical failure matrix, and contributor delivery material.
 - [ADR-0002: API and worker separation](docs/adr/0002-api-worker-separation.md)
 - [ADR-0003: run, attempt, and event records](docs/adr/0003-run-attempt-event-model.md)
 - [ADR-0004: API security boundary](docs/adr/0004-api-security-boundary.md)
+- [Policy-aware provider routing](docs/architecture/routing-policy.md)
 - [Critical failure matrix](docs/testing/failure-matrix.md)
 
 ## V0 technology direction
@@ -195,7 +196,11 @@ without binding new deliveries to it, so an upgrade does not strand ARR-6 messag
 
 ## Provider adapters
 
-Workers resolve the current attempt's provider from the immutable `provider_order`.
+The acceptance API turns optional `policy.routing` candidates and a strategy
+(`lowest_latency`, `lowest_cost`, `quality_first`, or `balanced`) into an
+explainable, immutable `provider_order`; see the [routing policy
+contract](docs/architecture/routing-policy.md). Workers resolve the current
+attempt's provider from that immutable order.
 `deterministic` remains the default safe local adapter. The first real adapter is
 OpenAI Responses: set `APP_OPENAI_API_KEY` only in the worker environment and submit
 `policy.provider_order: ["openai"]`. Its input requires either `input.prompt` or

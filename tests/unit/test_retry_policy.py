@@ -45,19 +45,20 @@ def test_backoff_is_exponential_and_bounded() -> None:
 
 
 def test_policy_snapshot_contains_resolved_defaults() -> None:
-    assert build_policy_snapshot(
+    snapshot = build_policy_snapshot(
         {"max_attempts": 4},
         max_attempts=3,
         attempt_timeout_seconds=30,
         initial_backoff_seconds=2,
         max_backoff_seconds=60,
-    ) == {
-        "max_attempts": 4,
-        "attempt_timeout_seconds": 30.0,
-        "initial_backoff_seconds": 2.0,
-        "max_backoff_seconds": 60.0,
-        "provider_order": ["deterministic"],
-    }
+    )
+
+    assert snapshot["max_attempts"] == 4
+    assert snapshot["attempt_timeout_seconds"] == 30.0
+    assert snapshot["initial_backoff_seconds"] == 2.0
+    assert snapshot["max_backoff_seconds"] == 60.0
+    assert snapshot["provider_order"] == ["deterministic"]
+    assert snapshot["routing"]["decision"]["selected_provider"] == "deterministic"
 
 
 def test_invalid_policy_is_rejected() -> None:
