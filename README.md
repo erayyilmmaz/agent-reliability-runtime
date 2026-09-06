@@ -232,6 +232,7 @@ pytest with coverage, and an isolated Docker Compose smoke demo on pushes and
 pull requests. See the [critical failure matrix](docs/testing/failure-matrix.md)
 for the exact scenario-to-evidence mapping.
 
-Before publishing the repository as an open-source project, the maintainer
-must select and add a license. That choice affects permitted reuse and is not
-assumed by this technical delivery.
+## License
+
+Copyright 2026 Eray Yılmaz. Distributed under the
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for project attribution.
