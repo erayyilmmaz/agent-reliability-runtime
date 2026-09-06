@@ -36,10 +36,10 @@ by idempotent worker processing; V0 does not claim exactly-once execution.
 
 ## Current milestone
 
-ARR-2 establishes the FastAPI project, four isolated runtime entry points,
-configuration validation, migrations, local Docker Compose services, and the
-initial deterministic test suite. The next milestone is durable run persistence
-and `POST /runs` returning `202 Accepted`.
+ARR-3 establishes durable PostgreSQL entities for runs, attempts, events,
+outbox delivery intent, and evaluations. It also makes execution transitions
+explicit and rejects illegal state changes. The next milestone is `POST /runs`
+returning `202 Accepted` with idempotent submission.
 
 ## Source-of-truth documents
 
