@@ -80,5 +80,23 @@ make migrate
 make down
 ```
 
-The API currently exposes `GET /healthz`; actual run submission is introduced
-in ARR-4 after the ARR-3 persistence model is complete.
+The API also exposes `GET /healthz` for process-level health checks.
+
+## Run API
+
+`POST /v1/runs` accepts a durable run and immediately returns `202 Accepted`.
+It never calls a provider or waits for RabbitMQ delivery. Every request must
+include `X-Client-Id` and an `Idempotency-Key` (8–255 URL-safe characters).
+
+```bash
+curl -X POST http://localhost:8000/v1/runs \
+  -H 'Content-Type: application/json' \
+  -H 'X-Client-Id: local-demo' \
+  -H 'Idempotency-Key: local-demo-run-0001' \
+  --data '{"input":{"prompt":"hello"}}'
+```
+
+Repeating a semantically identical request with the same client/key returns the
+original run. Reusing that key with a different body returns `409 Conflict`.
+Run, attempt, and event reads are available at `GET /v1/runs/{run_id}`, `GET
+/v1/runs/{run_id}/attempts`, and `GET /v1/runs/{run_id}/events`.
