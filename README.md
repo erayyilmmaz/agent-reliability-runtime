@@ -100,3 +100,12 @@ Repeating a semantically identical request with the same client/key returns the
 original run. Reusing that key with a different body returns `409 Conflict`.
 Run, attempt, and event reads are available at `GET /v1/runs/{run_id}`, `GET
 /v1/runs/{run_id}/attempts`, and `GET /v1/runs/{run_id}/events`.
+
+## Reliable dispatch
+
+The API transaction creates a Run, `RUN_QUEUED` event, and outbox event
+together. The separate dispatcher locks an unpublished event, publishes a
+minimal persistent RabbitMQ message, waits for publisher confirmation, then
+marks `published_at`. A broker outage leaves the run and outbox event durable;
+the dispatcher retries it later. A crash after broker confirmation but before
+the database update may publish a duplicate, so consumers must be idempotent.
