@@ -11,6 +11,7 @@ from agent_runtime.application.execution import ClaimDecision, ClaimResult, Exec
 from agent_runtime.domain.retry import RetryPolicy, is_retryable_error
 from agent_runtime.domain.states import ExecutionStatus, is_terminal_execution_status
 from agent_runtime.infrastructure.database.models import OutboxEvent, Run, RunAttempt, RunEvent
+from agent_runtime.observability.metrics import get_runtime_metrics
 
 
 class ExecutionPersistenceService:
@@ -58,6 +59,15 @@ class ExecutionPersistenceService:
                 run.started_at = run.started_at or now
                 session.add(attempt)
                 await session.flush()
+                get_runtime_metrics().attempt_started(provider)
+                if attempt_number > 1:
+                    previous_provider = retry_policy.provider_order[
+                        min(attempt_number - 2, len(retry_policy.provider_order) - 1)
+                    ]
+                    if previous_provider != provider:
+                        get_runtime_metrics().provider_fallback(
+                            from_provider=previous_provider, to_provider=provider
+                        )
                 session.add(
                     RunEvent(
                         run_id=run.id,
@@ -103,6 +113,9 @@ class ExecutionPersistenceService:
                 run.error_code = None
                 run.next_attempt_at = None
                 self._clear_lease(run)
+                get_runtime_metrics().attempt_completed(
+                    provider=result.provider, outcome="SUCCEEDED", error_code=None
+                )
                 session.add(
                     RunEvent(
                         run_id=run.id,
@@ -131,6 +144,9 @@ class ExecutionPersistenceService:
                 if attempt is None or attempt.run_id != run.id:
                     return False
                 self._finish_failed_attempt(attempt, now, error_code)
+                get_runtime_metrics().attempt_completed(
+                    provider=attempt.provider, outcome="FAILED", error_code=error_code
+                )
                 self._schedule_retry_or_finalize(
                     session=session,
                     run=run,
@@ -162,6 +178,11 @@ class ExecutionPersistenceService:
                     if attempt is None:
                         continue
                     self._finish_failed_attempt(attempt, now, "EXECUTION_LEASE_EXPIRED")
+                    get_runtime_metrics().attempt_completed(
+                        provider=attempt.provider,
+                        outcome="LEASE_EXPIRED",
+                        error_code="EXECUTION_LEASE_EXPIRED",
+                    )
                     self._schedule_retry_or_finalize(
                         session=session,
                         run=run,
@@ -198,7 +219,7 @@ class ExecutionPersistenceService:
                         OutboxEvent(
                             aggregate_id=run.id,
                             event_type="RUN_QUEUED",
-                            payload={"trace_context": {}, "reason": "retry_due"},
+                            payload={"trace_context": run.trace_context, "reason": "retry_due"},
                         )
                     )
                     session.add(
@@ -288,6 +309,7 @@ class ExecutionPersistenceService:
             next_attempt_at = now + timedelta(seconds=delay_seconds)
             run.execution_status = ExecutionStatus.RETRY_SCHEDULED
             run.next_attempt_at = next_attempt_at
+            get_runtime_metrics().retry_scheduled(error_code)
             session.add(
                 RunEvent(
                     run_id=run.id,
@@ -312,7 +334,7 @@ class ExecutionPersistenceService:
                 OutboxEvent(
                     aggregate_id=run.id,
                     event_type="RUN_DEAD_LETTERED",
-                    payload={"trace_context": {}, "error_code": error_code},
+                    payload={"trace_context": run.trace_context, "error_code": error_code},
                 )
             )
             event_type = "RUN_DEAD_LETTERED"

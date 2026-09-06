@@ -51,6 +51,7 @@ class Run(Base):
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     input_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     policy_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    trace_context: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     execution_status: Mapped[ExecutionStatus] = mapped_column(
         SqlEnum(ExecutionStatus, native_enum=False, create_constraint=False, length=32),
         nullable=False,

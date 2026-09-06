@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Agent Reliability Runtime
+    orgId: 1
+    folder: Agent Reliability Runtime
+    type: file
+    disableDeletion: true
+    editable: false
+    options:
+      path: /var/lib/grafana/dashboards

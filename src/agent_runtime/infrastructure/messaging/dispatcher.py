@@ -9,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_runtime.infrastructure.database.models import OutboxEvent, RunEvent
+from agent_runtime.observability.metrics import get_runtime_metrics
+from agent_runtime.observability.telemetry import extract_trace_context, get_tracer
 
 
 class OutboxPublisher(Protocol):
@@ -64,33 +66,48 @@ class OutboxDispatcher:
                 if event is None:
                     return DispatchResult(found_event=False, published=False)
 
-                try:
-                    await self._publisher.publish(event)
-                except Exception as exc:
+                trace_context = event.payload.get("trace_context", {})
+                carrier = trace_context if isinstance(trace_context, dict) else {}
+                with get_tracer().start_as_current_span(
+                    "arr.outbox.dispatch", context=extract_trace_context(carrier)
+                ) as span:
+                    span.set_attribute("arr.run_id", str(event.aggregate_id))
+                    span.set_attribute("arr.outbox.event_type", event.event_type)
+                    try:
+                        await self._publisher.publish(event)
+                    except Exception as exc:
+                        event.publish_attempts += 1
+                        event.last_error = type(exc).__name__
+                        get_runtime_metrics().outbox_dispatch(
+                            event_type=event.event_type, outcome="failed"
+                        )
+                        session.add(
+                            RunEvent(
+                                run_id=event.aggregate_id,
+                                event_type="OUTBOX_PUBLISH_FAILED",
+                                metadata_={
+                                    "event_id": str(event.id),
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                        )
+                        logging.getLogger(__name__).warning(
+                            "outbox_publish_failed",
+                            extra={"event": "outbox_publish_failed", "run_id": event.aggregate_id},
+                        )
+                        return DispatchResult(found_event=True, published=False)
+
                     event.publish_attempts += 1
-                    event.last_error = type(exc).__name__
+                    event.published_at = datetime.now(UTC)
+                    event.last_error = None
+                    get_runtime_metrics().outbox_dispatch(
+                        event_type=event.event_type, outcome="published"
+                    )
                     session.add(
                         RunEvent(
                             run_id=event.aggregate_id,
-                            event_type="OUTBOX_PUBLISH_FAILED",
-                            metadata_={"event_id": str(event.id), "error_type": type(exc).__name__},
+                            event_type="OUTBOX_PUBLISHED",
+                            metadata_={"event_id": str(event.id)},
                         )
                     )
-                    logging.getLogger(__name__).warning(
-                        "outbox_publish_failed event_id=%s error_type=%s",
-                        event.id,
-                        type(exc).__name__,
-                    )
-                    return DispatchResult(found_event=True, published=False)
-
-                event.publish_attempts += 1
-                event.published_at = datetime.now(UTC)
-                event.last_error = None
-                session.add(
-                    RunEvent(
-                        run_id=event.aggregate_id,
-                        event_type="OUTBOX_PUBLISHED",
-                        metadata_={"event_id": str(event.id)},
-                    )
-                )
-                return DispatchResult(found_event=True, published=True)
+                    return DispatchResult(found_event=True, published=True)

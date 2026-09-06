@@ -22,6 +22,7 @@ from agent_runtime.infrastructure.messaging.publisher import (
     QUEUE_NAME,
     ROUTING_KEY,
 )
+from agent_runtime.observability.telemetry import extract_trace_context, get_tracer
 
 
 class WorkerExecutor(Protocol):
@@ -94,6 +95,14 @@ class RabbitMqWorker:
             await message.reject(requeue=False)
             return
 
+        with get_tracer().start_as_current_span(
+            "arr.worker.process",
+            context=extract_trace_context(self.trace_context_from_message(message.body)),
+        ) as span:
+            span.set_attribute("arr.run_id", str(run_id))
+            await self._handle_run_delivery(message, run_id)
+
+    async def _handle_run_delivery(self, message: AbstractIncomingMessage, run_id: UUID) -> None:
         try:
             claim = await self._execution_service.claim(run_id=run_id, worker_id=self._worker_id)
             if claim.decision != ClaimDecision.CLAIMED:
@@ -144,13 +153,39 @@ class RabbitMqWorker:
 
     @staticmethod
     def run_id_from_message(body: bytes) -> UUID:
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError as exc:
-            raise ValueError("Message body is not JSON") from exc
-        if not isinstance(payload, Mapping) or not isinstance(payload.get("run_id"), str):
+        payload = RabbitMqWorker._message_payload(body)
+        if not isinstance(payload.get("run_id"), str):
             raise ValueError("Message does not contain a run_id")
         try:
             return UUID(payload["run_id"])
         except ValueError as exc:
             raise ValueError("Message run_id is invalid") from exc
+
+    @staticmethod
+    def trace_context_from_message(body: bytes) -> dict[str, str]:
+        try:
+            payload = RabbitMqWorker._message_payload(body)
+        except ValueError:
+            return {}
+        trace_context = payload.get("trace_context", {})
+        if not isinstance(trace_context, Mapping):
+            return {}
+        return {
+            key: value
+            for key, value in trace_context.items()
+            if (
+                isinstance(key, str)
+                and isinstance(value, str)
+                and key in {"traceparent", "tracestate"}
+            )
+        }
+
+    @staticmethod
+    def _message_payload(body: bytes) -> Mapping[str, Any]:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Message body is not JSON") from exc
+        if not isinstance(payload, Mapping):
+            raise ValueError("Message body is not an object")
+        return payload

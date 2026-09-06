@@ -1,0 +1,48 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "title": "Submitted runs / minute",
+      "targets": [{"expr": "sum(rate(arr_runs_submitted_total[1m]))", "refId": "A"}],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "title": "Attempts by outcome",
+      "targets": [{"expr": "sum by (outcome) (rate(arr_attempts_completed_total[1m]))", "refId": "A"}],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "title": "Retries / minute",
+      "targets": [{"expr": "sum(rate(arr_retries_scheduled_total[1m]))", "refId": "A"}],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "title": "Outbox dispatches by outcome",
+      "targets": [{"expr": "sum by (outcome) (rate(arr_outbox_dispatches_total[1m]))", "refId": "A"}],
+      "type": "timeseries"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["agent-runtime"],
+  "time": {"from": "now-15m", "to": "now"},
+  "title": "Agent Reliability Runtime",
+  "uid": "agent-runtime",
+  "version": 1
+}

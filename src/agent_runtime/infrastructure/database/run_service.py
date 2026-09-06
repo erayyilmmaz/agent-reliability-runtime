@@ -17,6 +17,8 @@ from agent_runtime.application.runs import (
 )
 from agent_runtime.domain.states import EvaluationStatus, ExecutionStatus
 from agent_runtime.infrastructure.database.models import OutboxEvent, Run, RunAttempt, RunEvent
+from agent_runtime.observability.metrics import get_runtime_metrics
+from agent_runtime.observability.telemetry import get_tracer, inject_trace_context
 
 
 class SqlAlchemyRunService:
@@ -35,51 +37,65 @@ class SqlAlchemyRunService:
     ) -> tuple[RunSnapshot, bool]:
         request_hash = canonical_request_hash(input_payload, policy_snapshot)
 
-        async with self._session_factory() as session:
-            try:
-                async with session.begin():
-                    existing = await self._find_by_idempotency_key(
+        with get_tracer().start_as_current_span("arr.db.run.submit") as span:
+            async with self._session_factory() as session:
+                try:
+                    async with session.begin():
+                        existing = await self._find_by_idempotency_key(
+                            session, client_id=client_id, idempotency_key=idempotency_key
+                        )
+                        if existing is not None:
+                            span.set_attribute("arr.run_id", str(existing.id))
+                            span.set_attribute("arr.idempotency_replay", True)
+                            return self._to_run_snapshot(existing), self._match_or_raise(
+                                existing, request_hash
+                            )
+
+                        trace_context = inject_trace_context()
+                        run = Run(
+                            client_id=client_id,
+                            idempotency_key=idempotency_key,
+                            request_hash=request_hash,
+                            input_payload=input_payload,
+                            policy_snapshot=policy_snapshot,
+                            trace_context=trace_context,
+                            execution_status=ExecutionStatus.QUEUED,
+                            evaluation_status=EvaluationStatus.NOT_RUN,
+                        )
+                        session.add(run)
+                        await session.flush()
+                        span.set_attribute("arr.run_id", str(run.id))
+                        session.add(
+                            OutboxEvent(
+                                aggregate_id=run.id,
+                                event_type="RUN_QUEUED",
+                                payload={"trace_context": trace_context},
+                            )
+                        )
+                        session.add(
+                            RunEvent(
+                                run_id=run.id,
+                                event_type="RUN_QUEUED",
+                                metadata_={"source": "api"},
+                            )
+                        )
+                        await session.flush()
+                        provider = policy_snapshot.get("provider_order", ["deterministic"])[0]
+                        get_runtime_metrics().run_submitted(
+                            provider if isinstance(provider, str) else "other"
+                        )
+                        return self._to_run_snapshot(run), False
+                except IntegrityError:
+                    # A competing request inserted the same client/key first. The
+                    # unique constraint is the final concurrency authority.
+                    existing = await self._get_idempotent_run_after_race(
                         session, client_id=client_id, idempotency_key=idempotency_key
                     )
-                    if existing is not None:
-                        return self._to_run_snapshot(existing), self._match_or_raise(
-                            existing, request_hash
-                        )
-
-                    run = Run(
-                        client_id=client_id,
-                        idempotency_key=idempotency_key,
-                        request_hash=request_hash,
-                        input_payload=input_payload,
-                        policy_snapshot=policy_snapshot,
-                        execution_status=ExecutionStatus.QUEUED,
-                        evaluation_status=EvaluationStatus.NOT_RUN,
+                    span.set_attribute("arr.run_id", str(existing.id))
+                    span.set_attribute("arr.idempotency_replay", True)
+                    return self._to_run_snapshot(existing), self._match_or_raise(
+                        existing, request_hash
                     )
-                    session.add(run)
-                    await session.flush()
-                    session.add(
-                        OutboxEvent(
-                            aggregate_id=run.id,
-                            event_type="RUN_QUEUED",
-                            payload={"run_id": str(run.id)},
-                        )
-                    )
-                    session.add(
-                        RunEvent(
-                            run_id=run.id,
-                            event_type="RUN_QUEUED",
-                            metadata_={"source": "api"},
-                        )
-                    )
-                    await session.flush()
-                    return self._to_run_snapshot(run), False
-            except IntegrityError:
-                # A competing request inserted the same client/key first. The
-                # unique constraint is the final concurrency authority.
-                existing = await self._get_idempotent_run_after_race(
-                    session, client_id=client_id, idempotency_key=idempotency_key
-                )
-                return self._to_run_snapshot(existing), self._match_or_raise(existing, request_hash)
 
     async def get_run(self, *, client_id: str, run_id: UUID) -> RunSnapshot:
         async with self._session_factory() as session:

@@ -31,3 +31,7 @@ def test_run_idempotency_is_scoped_per_client() -> None:
 
 def test_run_has_persisted_next_attempt_timestamp() -> None:
     assert "next_attempt_at" in Run.__table__.c
+
+
+def test_run_persists_trace_context_for_retries_and_fallbacks() -> None:
+    assert "trace_context" in Run.__table__.c

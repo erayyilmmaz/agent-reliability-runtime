@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 from uuid import UUID
 
 from fastapi import FastAPI, Header, Request, status
@@ -33,6 +33,7 @@ from agent_runtime.infrastructure.database.session import (
     create_database_engine,
     create_session_factory,
 )
+from agent_runtime.observability.telemetry import extract_trace_context, get_tracer
 from agent_runtime.settings import Settings, get_settings
 
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,254}$")
@@ -116,6 +117,25 @@ def create_app(
     app = FastAPI(title="Agent Reliability Runtime", version="0.1.0", lifespan=lifespan)
     app.state.settings = runtime_settings
     app.state.run_service = run_service
+
+    @app.middleware("http")
+    async def trace_http_request(request: Request, call_next: Any) -> Any:
+        carrier = {
+            header: request.headers[header]
+            for header in ("traceparent", "tracestate")
+            if header in request.headers
+        }
+        with get_tracer().start_as_current_span(
+            f"HTTP {request.method}", context=extract_trace_context(carrier)
+        ) as span:
+            span.set_attribute("http.request.method", request.method)
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                span.record_exception(exc)
+                raise
+            span.set_attribute("http.response.status_code", response.status_code)
+            return response
 
     @app.exception_handler(ApiProblem)
     async def api_problem_handler(_: Request, exc: ApiProblem) -> JSONResponse:

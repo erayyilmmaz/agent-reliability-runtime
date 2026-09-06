@@ -14,6 +14,8 @@ from agent_runtime.infrastructure.database.session import (
 from agent_runtime.infrastructure.messaging.dispatcher import OutboxDispatcher
 from agent_runtime.infrastructure.messaging.publisher import RabbitMqPublisher
 from agent_runtime.infrastructure.messaging.worker import RabbitMqWorker
+from agent_runtime.observability.logging import configure_structured_logging
+from agent_runtime.observability.telemetry import TelemetryRuntime, configure_telemetry
 from agent_runtime.providers.deterministic import DeterministicProvider
 from agent_runtime.providers.openai_responses import OpenAIResponsesProvider
 from agent_runtime.providers.registry import ProviderRegistry
@@ -24,12 +26,18 @@ def run_api() -> None:
     """Run only the FastAPI process."""
 
     settings = get_settings()
-    uvicorn.run(
-        "agent_runtime.api.main:app",
-        host="0.0.0.0",
-        port=8000,
-        log_level=settings.log_level.lower(),
-    )
+    telemetry = _configure_process_observability(settings, "agent-runtime-api")
+    try:
+        uvicorn.run(
+            "agent_runtime.api.main:app",
+            host="0.0.0.0",
+            port=8000,
+            log_level=settings.log_level.lower(),
+            log_config=None,
+            access_log=False,
+        )
+    finally:
+        _shutdown_telemetry(telemetry)
 
 
 async def _run_idle_process(name: str, settings: Settings) -> None:
@@ -65,8 +73,12 @@ async def _run_dispatcher(settings: Settings) -> None:
 
 
 def run_dispatcher() -> None:
-    logging.basicConfig(level=get_settings().log_level, format="%(message)s")
-    asyncio.run(_run_dispatcher(get_settings()))
+    settings = get_settings()
+    telemetry = _configure_process_observability(settings, "agent-runtime-dispatcher")
+    try:
+        asyncio.run(_run_dispatcher(settings))
+    finally:
+        _shutdown_telemetry(telemetry)
 
 
 async def _run_worker(settings: Settings) -> None:
@@ -97,8 +109,12 @@ async def _run_worker(settings: Settings) -> None:
 
 
 def run_worker() -> None:
-    logging.basicConfig(level=get_settings().log_level, format="%(message)s")
-    asyncio.run(_run_worker(get_settings()))
+    settings = get_settings()
+    telemetry = _configure_process_observability(settings, "agent-runtime-worker")
+    try:
+        asyncio.run(_run_worker(settings))
+    finally:
+        _shutdown_telemetry(telemetry)
 
 
 async def _run_recovery(settings: Settings) -> None:
@@ -126,5 +142,21 @@ async def _run_recovery(settings: Settings) -> None:
 
 
 def run_recovery() -> None:
-    logging.basicConfig(level=get_settings().log_level, format="%(message)s")
-    asyncio.run(_run_recovery(get_settings()))
+    settings = get_settings()
+    telemetry = _configure_process_observability(settings, "agent-runtime-scheduler")
+    try:
+        asyncio.run(_run_recovery(settings))
+    finally:
+        _shutdown_telemetry(telemetry)
+
+
+def _configure_process_observability(
+    settings: Settings, service_name: str
+) -> TelemetryRuntime | None:
+    configure_structured_logging(settings.log_level)
+    return configure_telemetry(settings=settings, service_name=service_name)
+
+
+def _shutdown_telemetry(telemetry: TelemetryRuntime | None) -> None:
+    if telemetry is not None:
+        telemetry.shutdown()

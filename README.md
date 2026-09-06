@@ -149,3 +149,17 @@ OpenAI Responses: set `APP_OPENAI_API_KEY` only in the worker environment and su
 `store: false`, stores only response ID/model/text/token counts, and never persists a
 provider error body or API key. HTTP 429 and 5xx responses preserve their status for
 the retry classifier; 401/403 and malformed provider input finish without retry.
+
+## Observability
+
+Every process exports OTLP traces and metrics to the bundled collector. The API creates
+the root HTTP span, stores only W3C `traceparent`/`tracestate` in the transactional
+outbox, and the dispatcher, worker, database work, and provider adapter continue that
+same trace. Trace attributes may contain `run_id` and `attempt_id` for debugging, but
+metrics deliberately never use either as a label. Metric dimensions are restricted to
+known providers, controlled error codes, outcomes, and event types.
+
+Docker Compose provisions Prometheus at `http://localhost:9090` and a read-only Grafana
+dashboard at `http://localhost:3000`. The JSON logger has an allowlist (`event`, run and
+attempt IDs, provider, error code, trace/span IDs), so prompt, input, response and secret
+fields cannot reach logs. OTLP instrumentation never captures HTTP bodies or headers.
