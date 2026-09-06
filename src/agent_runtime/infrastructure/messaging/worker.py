@@ -133,7 +133,8 @@ class RabbitMqWorker:
             result = await asyncio.wait_for(
                 self._executor.execute(
                     provider=claim.provider,
-                    input_payload=claim.input_payload, policy_snapshot=claim.policy_snapshot
+                    input_payload=claim.input_payload,
+                    policy_snapshot=claim.policy_snapshot,
                 ),
                 timeout=retry_policy.attempt_timeout_seconds,
             )

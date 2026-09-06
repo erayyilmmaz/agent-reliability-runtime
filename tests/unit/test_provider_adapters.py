@@ -106,8 +106,6 @@ async def test_registry_resolves_selected_provider_and_rejects_unknown_provider(
     registry = ProviderRegistry([_FakeProvider()])
 
     result = await registry.execute(provider="fake", input_payload={}, policy_snapshot={})
-    assert result == ExecutionResult(
-        provider="fake", result_payload={"ok": True}
-    )
+    assert result == ExecutionResult(provider="fake", result_payload={"ok": True})
     with pytest.raises(ProviderConfigurationError, match="not configured"):
         await registry.execute(provider="unknown", input_payload={}, policy_snapshot={})

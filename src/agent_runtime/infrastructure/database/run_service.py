@@ -221,9 +221,7 @@ class SqlAlchemyRunService:
                 await session.flush()
                 return self._to_evaluation_snapshot(persisted_evaluation)
 
-    async def get_evaluations(
-        self, *, client_id: str, run_id: UUID
-    ) -> list[EvaluationSnapshot]:
+    async def get_evaluations(self, *, client_id: str, run_id: UUID) -> list[EvaluationSnapshot]:
         async with self._session_factory() as session:
             await self._get_run_for_client(session, client_id=client_id, run_id=run_id)
             evaluations = await session.scalars(

@@ -32,8 +32,7 @@ def evaluate_rules(
         raise EvaluationConfigurationError("at least one evaluation rule is required")
 
     results = [
-        _evaluate_rule(rule, result_payload=result_payload, latency_ms=latency_ms)
-        for rule in rules
+        _evaluate_rule(rule, result_payload=result_payload, latency_ms=latency_ms) for rule in rules
     ]
     return EvaluationOutcome(passed=all(item["passed"] for item in results), rule_results=results)
 

@@ -36,10 +36,11 @@ by idempotent worker processing; V0 does not claim exactly-once execution.
 
 ## Current milestone
 
-ARR-3 establishes durable PostgreSQL entities for runs, attempts, events,
-outbox delivery intent, and evaluations. It also makes execution transitions
-explicit and rejects illegal state changes. The next milestone is `POST /runs`
-returning `202 Accepted` with idempotent submission.
+V0 is feature-complete as a portfolio-quality reliability runtime: durable
+submission, transactional outbox, leased worker execution, retry/dead-letter
+handling, provider fallback, evaluation/replay, observability, and an optional
+production API boundary are implemented. ARR-12 adds the clean-checkout CI,
+Compose smoke demo, critical failure matrix, and contributor delivery material.
 
 ## Source-of-truth documents
 
@@ -47,6 +48,8 @@ returning `202 Accepted` with idempotent submission.
 - [ADR-0001: transactional outbox](docs/adr/0001-transactional-outbox.md)
 - [ADR-0002: API and worker separation](docs/adr/0002-api-worker-separation.md)
 - [ADR-0003: run, attempt, and event records](docs/adr/0003-run-attempt-event-model.md)
+- [ADR-0004: API security boundary](docs/adr/0004-api-security-boundary.md)
+- [Critical failure matrix](docs/testing/failure-matrix.md)
 
 ## V0 technology direction
 
@@ -81,6 +84,31 @@ make down
 ```
 
 The API also exposes `GET /healthz` for process-level health checks.
+
+## Five-minute credentials-free demo
+
+The default local provider is deterministic, so this demo needs no OpenAI or
+other provider credential. It proves the entire API → PostgreSQL outbox →
+RabbitMQ → worker path.
+
+```bash
+make smoke
+```
+
+For an interactive session, run `make dev`, apply migrations in another
+terminal with `make migrate`, then submit a run:
+
+```bash
+curl -X POST http://localhost:8000/v1/runs \
+  -H 'Content-Type: application/json' \
+  -H 'X-Client-Id: local-demo' \
+  -H 'Idempotency-Key: local-demo-run-0001' \
+  --data '{"input":{"prompt":"hello"}}'
+```
+
+Poll the returned run through `GET /v1/runs/{run_id}`. Grafana is available at
+`http://localhost:3000` and the provisioned **Agent Reliability Runtime**
+dashboard reads metrics from Prometheus at `http://localhost:9090`.
 
 ## Run API
 
@@ -196,3 +224,14 @@ and a credential fingerprint—never an API key, header, request body, provider
 response, stack trace, or configuration secret. Local Docker development stays
 explicitly in `disabled` auth mode; enable API-key mode through a local secret
 manager or deployment environment before exposing the API.
+
+## Delivery checks
+
+The GitHub Actions workflow runs locked dependency installation, Ruff, mypy,
+pytest with coverage, and an isolated Docker Compose smoke demo on pushes and
+pull requests. See the [critical failure matrix](docs/testing/failure-matrix.md)
+for the exact scenario-to-evidence mapping.
+
+Before publishing the repository as an open-source project, the maintainer
+must select and add a license. That choice affects permitted reuse and is not
+assumed by this technical delivery.
