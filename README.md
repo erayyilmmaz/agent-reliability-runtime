@@ -109,3 +109,12 @@ minimal persistent RabbitMQ message, waits for publisher confirmation, then
 marks `published_at`. A broker outage leaves the run and outbox event durable;
 the dispatcher retries it later. A crash after broker confirmation but before
 the database update may publish a duplicate, so consumers must be idempotent.
+
+## Worker leases
+
+Workers consume with manual acknowledgement. They atomically claim a queued run,
+create a numbered attempt, and record a worker-owned execution lease before
+executing it. Terminal runs and deliveries held by another active lease are
+acknowledged without a second execution. A successful durable state update
+precedes the acknowledgement. The scheduler marks expired leases as
+`RETRY_SCHEDULED`, preserving the failed attempt for later retry policy.

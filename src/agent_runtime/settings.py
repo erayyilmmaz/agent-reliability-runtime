@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     outbox_batch_size: int = Field(default=50, ge=1, le=500)
     outbox_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
     outbox_publish_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    execution_lease_seconds: int = Field(default=120, ge=5, le=3600)
+    lease_recovery_poll_interval_seconds: float = Field(default=5.0, gt=0, le=300)
     otel_endpoint: AnyUrl = AnyUrl("http://localhost:4318")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 

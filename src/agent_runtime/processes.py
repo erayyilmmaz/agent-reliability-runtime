@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 
 import uvicorn
 
+from agent_runtime.execution.deterministic import DeterministicExecutor
+from agent_runtime.infrastructure.database.execution_service import ExecutionPersistenceService
 from agent_runtime.infrastructure.database.session import (
     create_database_engine,
     create_session_factory,
 )
 from agent_runtime.infrastructure.messaging.dispatcher import OutboxDispatcher
 from agent_runtime.infrastructure.messaging.publisher import RabbitMqPublisher
+from agent_runtime.infrastructure.messaging.worker import RabbitMqWorker
 from agent_runtime.settings import Settings, get_settings
 
 
@@ -63,9 +67,45 @@ def run_dispatcher() -> None:
     asyncio.run(_run_dispatcher(get_settings()))
 
 
+async def _run_worker(settings: Settings) -> None:
+    engine = create_database_engine(settings)
+    worker = RabbitMqWorker(
+        url=str(settings.rabbitmq_url),
+        worker_id=socket.gethostname(),
+        prefetch_count=settings.worker_concurrency,
+        execution_service=ExecutionPersistenceService(
+            create_session_factory(engine), lease_seconds=settings.execution_lease_seconds
+        ),
+        executor=DeterministicExecutor(),
+    )
+    try:
+        await worker.run()
+    finally:
+        await worker.close()
+        await engine.dispose()
+
+
 def run_worker() -> None:
-    asyncio.run(_run_idle_process("worker", get_settings()))
+    logging.basicConfig(level=get_settings().log_level, format="%(message)s")
+    asyncio.run(_run_worker(get_settings()))
+
+
+async def _run_recovery(settings: Settings) -> None:
+    engine = create_database_engine(settings)
+    recovery = ExecutionPersistenceService(
+        create_session_factory(engine), lease_seconds=settings.execution_lease_seconds
+    )
+    logger = logging.getLogger(__name__)
+    try:
+        while True:
+            recovered_count = await recovery.recover_expired_leases()
+            if recovered_count:
+                logger.info("execution_lease_recovery_complete recovered_count=%s", recovered_count)
+            await asyncio.sleep(settings.lease_recovery_poll_interval_seconds)
+    finally:
+        await engine.dispose()
 
 
 def run_recovery() -> None:
-    asyncio.run(_run_idle_process("scheduler-recovery", get_settings()))
+    logging.basicConfig(level=get_settings().log_level, format="%(message)s")
+    asyncio.run(_run_recovery(get_settings()))
