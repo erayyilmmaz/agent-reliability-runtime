@@ -16,14 +16,19 @@ from agent_runtime.api.schemas import (
     AttemptResponse,
     CreateRunRequest,
     CreateRunResponse,
+    EvaluateRunRequest,
+    EvaluationResponse,
     EventResponse,
+    ReplayRunResponse,
     RunResponse,
 )
 from agent_runtime.application.runs import (
     AttemptSnapshot,
+    EvaluationSnapshot,
     EventSnapshot,
     IdempotencyConflictError,
     RunNotFoundError,
+    RunNotSucceededError,
     RunSnapshot,
     RunSubmissionService,
 )
@@ -80,6 +85,19 @@ def _to_event_response(event: EventSnapshot) -> EventResponse:
         event_type=event.event_type,
         metadata=event.metadata,
         created_at=event.created_at,
+    )
+
+
+def _to_evaluation_response(evaluation: EvaluationSnapshot) -> EvaluationResponse:
+    return EvaluationResponse(
+        evaluation_id=evaluation.id,
+        evaluator=evaluation.evaluator,
+        status=evaluation.status,
+        score=evaluation.score,
+        result=evaluation.result,
+        details=evaluation.details,
+        created_at=evaluation.created_at,
+        completed_at=evaluation.completed_at,
     )
 
 
@@ -276,6 +294,100 @@ def create_app(
                 status_code=status.HTTP_404_NOT_FOUND, code="RUN_NOT_FOUND", message=str(exc)
             ) from exc
         return [_to_event_response(event) for event in events]
+
+    @app.post(
+        "/v1/runs/{run_id}/evaluations",
+        response_model=EvaluationResponse,
+        responses={404: {"model": ApiErrorResponse}, 409: {"model": ApiErrorResponse}},
+    )
+    async def evaluate_run(
+        run_id: UUID,
+        payload: EvaluateRunRequest,
+        request: Request,
+        client_id: Annotated[str | None, Header(alias="X-Client-Id")] = None,
+    ) -> EvaluationResponse:
+        try:
+            evaluation = await _get_service(request).evaluate(
+                client_id=_required_client_id(client_id), run_id=run_id, rules=payload.rules
+            )
+        except RunNotFoundError as exc:
+            raise ApiProblem(
+                status_code=status.HTTP_404_NOT_FOUND, code="RUN_NOT_FOUND", message=str(exc)
+            ) from exc
+        except RunNotSucceededError as exc:
+            raise ApiProblem(
+                status_code=status.HTTP_409_CONFLICT,
+                code="RUN_NOT_SUCCEEDED",
+                message=str(exc),
+            ) from exc
+        return _to_evaluation_response(evaluation)
+
+    @app.get(
+        "/v1/runs/{run_id}/evaluations",
+        response_model=list[EvaluationResponse],
+        responses={404: {"model": ApiErrorResponse}},
+    )
+    async def get_evaluations(
+        run_id: UUID,
+        request: Request,
+        client_id: Annotated[str | None, Header(alias="X-Client-Id")] = None,
+    ) -> list[EvaluationResponse]:
+        try:
+            evaluations = await _get_service(request).get_evaluations(
+                client_id=_required_client_id(client_id), run_id=run_id
+            )
+        except RunNotFoundError as exc:
+            raise ApiProblem(
+                status_code=status.HTTP_404_NOT_FOUND, code="RUN_NOT_FOUND", message=str(exc)
+            ) from exc
+        return [_to_evaluation_response(evaluation) for evaluation in evaluations]
+
+    @app.post(
+        "/v1/runs/{run_id}/replay",
+        response_model=ReplayRunResponse,
+        responses={
+            422: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+        },
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def replay_run(
+        run_id: UUID,
+        request: Request,
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+        client_id: Annotated[str | None, Header(alias="X-Client-Id")] = None,
+    ) -> ReplayRunResponse:
+        if idempotency_key is None:
+            raise ApiProblem(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code="MISSING_IDEMPOTENCY_KEY",
+                message="Idempotency-Key header is required.",
+            )
+        try:
+            replay, replayed = await _get_service(request).replay(
+                client_id=_required_client_id(client_id),
+                run_id=run_id,
+                idempotency_key=_validate_idempotency_key(idempotency_key),
+            )
+        except RunNotFoundError as exc:
+            raise ApiProblem(
+                status_code=status.HTTP_404_NOT_FOUND, code="RUN_NOT_FOUND", message=str(exc)
+            ) from exc
+        except IdempotencyConflictError as exc:
+            raise ApiProblem(
+                status_code=status.HTTP_409_CONFLICT,
+                code="IDEMPOTENCY_KEY_REUSED",
+                message=str(exc),
+            ) from exc
+        if replay.replay_of_run_id is None:
+            raise RuntimeError("Replay must retain its source run")
+        return ReplayRunResponse(
+            run_id=replay.id,
+            execution_status=replay.execution_status,
+            replay_of_run_id=replay.replay_of_run_id,
+            replayed=replayed,
+        )
 
     return app
 

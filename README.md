@@ -163,3 +163,20 @@ Docker Compose provisions Prometheus at `http://localhost:9090` and a read-only 
 dashboard at `http://localhost:3000`. The JSON logger has an allowlist (`event`, run and
 attempt IDs, provider, error code, trace/span IDs), so prompt, input, response and secret
 fields cannot reach logs. OTLP instrumentation never captures HTTP bodies or headers.
+
+## Evaluation and replay
+
+`POST /v1/runs/{run_id}/evaluations` evaluates only a `SUCCEEDED` run's persisted
+result. The request contains an ordered `rules` list; V0 supports `non_empty`,
+`json_schema`, `latency_budget`, and generic `rule` (`exists`, `equals`,
+`not_equals`, `contains`, or `matches`) checks. Results are deterministic,
+stored in the `evaluations` lifecycle record, and available from
+`GET /v1/runs/{run_id}/evaluations`. An evaluation may be `FAILED` or `ERROR`
+without changing the run's execution result.
+
+`POST /v1/runs/{run_id}/replay` requires a fresh `Idempotency-Key` and creates
+a distinct `QUEUED` run whose `replay_of_run_id` points to the original. It
+deep-copies the original immutable input and resolved policy snapshot, writes
+audit events to both histories, and queues the new run through the regular
+transactional outbox. Repeating the same replay request with the same client
+and key returns that replay rather than creating another execution.

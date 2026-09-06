@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,9 +12,11 @@ from fastapi.testclient import TestClient
 from agent_runtime.api.main import create_app
 from agent_runtime.application.runs import (
     AttemptSnapshot,
+    EvaluationSnapshot,
     EventSnapshot,
     IdempotencyConflictError,
     RunNotFoundError,
+    RunNotSucceededError,
     RunSnapshot,
     canonical_request_hash,
 )
@@ -31,6 +34,7 @@ class InMemoryRunService:
         self._runs_by_key: dict[tuple[str, str], tuple[str, RunSnapshot]] = {}
         self._runs: dict[uuid.UUID, RunSnapshot] = {}
         self.submission_count = 0
+        self._evaluations: dict[uuid.UUID, list[EvaluationSnapshot]] = {}
 
     async def submit(
         self,
@@ -80,6 +84,57 @@ class InMemoryRunService:
     async def get_events(self, *, client_id: str, run_id: uuid.UUID) -> list[EventSnapshot]:
         await self.get_run(client_id=client_id, run_id=run_id)
         return []
+
+    async def evaluate(
+        self, *, client_id: str, run_id: uuid.UUID, rules: list[dict[str, Any]]
+    ) -> EvaluationSnapshot:
+        run = await self.get_run(client_id=client_id, run_id=run_id)
+        if run.execution_status != ExecutionStatus.SUCCEEDED:
+            raise RunNotSucceededError(
+                "Only a SUCCEEDED run with a persisted result can be evaluated"
+            )
+        evaluation = EvaluationSnapshot(
+            id=uuid.uuid4(),
+            evaluator="deterministic_rules",
+            status=EvaluationStatus.FAILED,
+            score=None,
+            result={"passed": False, "rules": [{"type": rules[0]["type"], "passed": False}]},
+            details={"rule_count": len(rules)},
+            created_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+        )
+        self._evaluations.setdefault(run_id, []).append(evaluation)
+        self._runs[run_id] = replace(run, evaluation_status=evaluation.status)
+        return evaluation
+
+    async def get_evaluations(
+        self, *, client_id: str, run_id: uuid.UUID
+    ) -> list[EvaluationSnapshot]:
+        await self.get_run(client_id=client_id, run_id=run_id)
+        return self._evaluations.get(run_id, [])
+
+    async def replay(
+        self, *, client_id: str, run_id: uuid.UUID, idempotency_key: str
+    ) -> tuple[RunSnapshot, bool]:
+        source = await self.get_run(client_id=client_id, run_id=run_id)
+        key = (client_id, idempotency_key)
+        existing = self._runs_by_key.get(key)
+        if existing is not None:
+            return existing[1], True
+        replay = replace(
+            source,
+            id=uuid.uuid4(),
+            execution_status=ExecutionStatus.QUEUED,
+            evaluation_status=EvaluationStatus.NOT_RUN,
+            created_at=datetime.now(UTC),
+            started_at=None,
+            completed_at=None,
+            replay_of_run_id=source.id,
+            error_code=None,
+        )
+        self._runs_by_key[key] = ("replay", replay)
+        self._runs[replay.id] = replay
+        return replay, False
 
 
 def _client(service: InMemoryRunService) -> TestClient:
@@ -190,6 +245,49 @@ def test_missing_run_returns_not_found() -> None:
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "RUN_NOT_FOUND"
+
+
+def test_evaluation_failure_does_not_change_successful_execution() -> None:
+    service = InMemoryRunService()
+    succeeded = RunSnapshot(
+        id=uuid.uuid4(),
+        execution_status=ExecutionStatus.SUCCEEDED,
+        evaluation_status=EvaluationStatus.NOT_RUN,
+        created_at=datetime.now(UTC),
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+        replay_of_run_id=None,
+        error_code=None,
+    )
+    service._runs[succeeded.id] = succeeded
+    with _client(service) as client:
+        response = client.post(
+            f"/v1/runs/{succeeded.id}/evaluations",
+            headers={"X-Client-Id": "test-client"},
+            json={"rules": [{"type": "non_empty", "path": "answer"}]},
+        )
+        run = client.get(f"/v1/runs/{succeeded.id}", headers={"X-Client-Id": "test-client"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "FAILED"
+    assert run.json()["execution_status"] == "SUCCEEDED"
+    assert run.json()["evaluation_status"] == "FAILED"
+
+
+def test_replay_creates_a_new_run_and_is_idempotent() -> None:
+    service = InMemoryRunService()
+    with _client(service) as client:
+        source = client.post("/v1/runs", headers=HEADERS, json={"input": {"prompt": "hello"}})
+        source_id = source.json()["run_id"]
+        headers = {"X-Client-Id": "test-client", "Idempotency-Key": "replay-run-0001"}
+        first = client.post(f"/v1/runs/{source_id}/replay", headers=headers)
+        repeated = client.post(f"/v1/runs/{source_id}/replay", headers=headers)
+
+    assert first.status_code == 202
+    assert first.json()["run_id"] != source_id
+    assert first.json()["replay_of_run_id"] == source_id
+    assert repeated.json()["run_id"] == first.json()["run_id"]
+    assert repeated.json()["replayed"] is True
 
 
 def test_canonical_hash_ignores_key_order() -> None:

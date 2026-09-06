@@ -1,4 +1,4 @@
-from agent_runtime.infrastructure.database.models import Base, Run
+from agent_runtime.infrastructure.database.models import Base, Evaluation, Run
 
 
 def test_metadata_contains_every_durable_runtime_entity() -> None:
@@ -35,3 +35,7 @@ def test_run_has_persisted_next_attempt_timestamp() -> None:
 
 def test_run_persists_trace_context_for_retries_and_fallbacks() -> None:
     assert "trace_context" in Run.__table__.c
+
+
+def test_evaluation_has_a_completion_timestamp_for_its_lifecycle() -> None:
+    assert "completed_at" in Evaluation.__table__.c

@@ -1,0 +1,20 @@
+[
+  {
+    "name": "deterministic-output-passes-contract",
+    "rules": [
+      {"type": "non_empty", "path": "answer"},
+      {"type": "rule", "path": "answer", "operator": "contains", "value": "ready"},
+      {"type": "latency_budget", "max_ms": 100}
+    ],
+    "result_payload": {"answer": "ready for review"},
+    "latency_ms": 42,
+    "passed": true
+  },
+  {
+    "name": "blank-answer-fails-quality-without-an-engine-error",
+    "rules": [{"type": "non_empty", "path": "answer"}],
+    "result_payload": {"answer": " "},
+    "latency_ms": 1,
+    "passed": false
+  }
+]

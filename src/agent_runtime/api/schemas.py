@@ -62,6 +62,30 @@ class EventResponse(BaseModel):
     created_at: datetime
 
 
+class EvaluateRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rules: list[dict[str, JsonValue]] = Field(min_length=1, max_length=32)
+
+
+class EvaluationResponse(BaseModel):
+    evaluation_id: UUID
+    evaluator: str
+    status: EvaluationStatus
+    score: float | None
+    result: dict[str, JsonValue] | None
+    details: dict[str, JsonValue] | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class ReplayRunResponse(BaseModel):
+    run_id: UUID
+    execution_status: ExecutionStatus
+    replay_of_run_id: UUID
+    replayed: bool
+
+
 class ApiErrorBody(BaseModel):
     code: str
     message: str

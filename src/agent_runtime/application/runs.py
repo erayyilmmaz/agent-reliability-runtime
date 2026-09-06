@@ -56,12 +56,28 @@ class EventSnapshot:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class EvaluationSnapshot:
+    id: uuid.UUID
+    evaluator: str
+    status: EvaluationStatus
+    score: float | None
+    result: dict[str, Any] | None
+    details: dict[str, Any] | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
 class RunNotFoundError(LookupError):
     """A requested run does not exist in the caller's visible scope."""
 
 
 class IdempotencyConflictError(ValueError):
     """The same key was reused for a semantically different request."""
+
+
+class RunNotSucceededError(ValueError):
+    """Evaluations can only inspect a durable successful provider result."""
 
 
 class RunSubmissionService(Protocol):
@@ -79,3 +95,15 @@ class RunSubmissionService(Protocol):
     async def get_attempts(self, *, client_id: str, run_id: uuid.UUID) -> list[AttemptSnapshot]: ...
 
     async def get_events(self, *, client_id: str, run_id: uuid.UUID) -> list[EventSnapshot]: ...
+
+    async def evaluate(
+        self, *, client_id: str, run_id: uuid.UUID, rules: list[dict[str, Any]]
+    ) -> EvaluationSnapshot: ...
+
+    async def get_evaluations(
+        self, *, client_id: str, run_id: uuid.UUID
+    ) -> list[EvaluationSnapshot]: ...
+
+    async def replay(
+        self, *, client_id: str, run_id: uuid.UUID, idempotency_key: str
+    ) -> tuple[RunSnapshot, bool]: ...
