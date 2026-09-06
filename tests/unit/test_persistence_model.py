@@ -27,3 +27,7 @@ def test_run_idempotency_is_scoped_per_client() -> None:
         "client_id",
         "idempotency_key",
     ]
+
+
+def test_run_has_persisted_next_attempt_timestamp() -> None:
+    assert "next_attempt_at" in Run.__table__.c

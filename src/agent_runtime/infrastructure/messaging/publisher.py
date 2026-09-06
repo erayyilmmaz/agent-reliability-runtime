@@ -11,8 +11,13 @@ from pamqp.commands import Basic
 from agent_runtime.infrastructure.database.models import OutboxEvent
 
 EXCHANGE_NAME = "agent_runtime"
-QUEUE_NAME = "agent_runtime.execution"
+LEGACY_QUEUE_NAME = "agent_runtime.execution"
+QUEUE_NAME = "agent_runtime.execution.v2"
 ROUTING_KEY = "run.queued"
+DEAD_LETTER_EXCHANGE_NAME = "agent_runtime.dlx"
+DEAD_LETTER_QUEUE_NAME = "agent_runtime.dead_letter"
+DEAD_LETTER_ROUTING_KEY = "run.dead_lettered"
+POISON_ROUTING_KEY = "poison"
 
 
 class PublishNotConfirmedError(RuntimeError):
@@ -27,10 +32,10 @@ class RabbitMqPublisher:
         self._publish_timeout_seconds = publish_timeout_seconds
         self._connection: AbstractConnection | None = None
         self._channel: AbstractChannel | None = None
-        self._exchange: AbstractExchange | None = None
+        self._exchanges: dict[str, AbstractExchange] = {}
 
     async def publish(self, event: OutboxEvent) -> None:
-        exchange = await self._get_exchange()
+        exchange, routing_key = await self._destination_for(event)
         message = aio_pika.Message(
             body=json.dumps(
                 self.message_payload(event), separators=(",", ":"), sort_keys=True
@@ -43,7 +48,7 @@ class RabbitMqPublisher:
         try:
             confirmation = await exchange.publish(
                 message,
-                routing_key=ROUTING_KEY,
+                routing_key=routing_key,
                 mandatory=True,
                 timeout=self._publish_timeout_seconds,
             )
@@ -72,17 +77,42 @@ class RabbitMqPublisher:
             await self._connection.close()
         self._connection = None
         self._channel = None
-        self._exchange = None
+        self._exchanges = {}
 
-    async def _get_exchange(self) -> AbstractExchange:
-        if self._exchange is not None:
-            return self._exchange
+    async def _destination_for(self, event: OutboxEvent) -> tuple[AbstractExchange, str]:
+        exchanges = await self._get_exchanges()
+        if event.event_type == "RUN_QUEUED":
+            return exchanges[EXCHANGE_NAME], ROUTING_KEY
+        if event.event_type == "RUN_DEAD_LETTERED":
+            return exchanges[DEAD_LETTER_EXCHANGE_NAME], DEAD_LETTER_ROUTING_KEY
+        raise ValueError(f"Unsupported outbox event type: {event.event_type}")
+
+    async def _get_exchanges(self) -> dict[str, AbstractExchange]:
+        if self._exchanges:
+            return self._exchanges
 
         self._connection = await aio_pika.connect_robust(self._url)
         self._channel = await self._connection.channel(publisher_confirms=True)
-        self._exchange = await self._channel.declare_exchange(
+        execution_exchange = await self._channel.declare_exchange(
             EXCHANGE_NAME, aio_pika.ExchangeType.DIRECT, durable=True
         )
-        queue = await self._channel.declare_queue(QUEUE_NAME, durable=True)
-        await queue.bind(self._exchange, routing_key=ROUTING_KEY)
-        return self._exchange
+        dead_letter_exchange = await self._channel.declare_exchange(
+            DEAD_LETTER_EXCHANGE_NAME, aio_pika.ExchangeType.DIRECT, durable=True
+        )
+        queue = await self._channel.declare_queue(
+            QUEUE_NAME,
+            durable=True,
+            arguments={
+                "x-dead-letter-exchange": DEAD_LETTER_EXCHANGE_NAME,
+                "x-dead-letter-routing-key": POISON_ROUTING_KEY,
+            },
+        )
+        dead_letter_queue = await self._channel.declare_queue(DEAD_LETTER_QUEUE_NAME, durable=True)
+        await queue.bind(execution_exchange, routing_key=ROUTING_KEY)
+        await dead_letter_queue.bind(dead_letter_exchange, routing_key=DEAD_LETTER_ROUTING_KEY)
+        await dead_letter_queue.bind(dead_letter_exchange, routing_key=POISON_ROUTING_KEY)
+        self._exchanges = {
+            EXCHANGE_NAME: execution_exchange,
+            DEAD_LETTER_EXCHANGE_NAME: dead_letter_exchange,
+        }
+        return self._exchanges

@@ -151,6 +151,23 @@ def test_malformed_request_is_a_standard_api_error() -> None:
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
+def test_invalid_retry_policy_is_rejected_before_submission() -> None:
+    service = InMemoryRunService()
+    with _client(service) as client:
+        response = client.post(
+            "/v1/runs",
+            headers=HEADERS,
+            json={
+                "input": {"prompt": "hello"},
+                "policy": {"initial_backoff_seconds": 4, "max_backoff_seconds": 2},
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_RETRY_POLICY"
+    assert service.submission_count == 0
+
+
 def test_get_endpoints_return_empty_history_for_queued_run() -> None:
     service = InMemoryRunService()
     with _client(service) as client:

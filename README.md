@@ -118,3 +118,22 @@ executing it. Terminal runs and deliveries held by another active lease are
 acknowledged without a second execution. A successful durable state update
 precedes the acknowledgement. The scheduler marks expired leases as
 `RETRY_SCHEDULED`, preserving the failed attempt for later retry policy.
+
+## Retry and dead-letter delivery
+
+Each accepted run stores a resolved retry policy in its immutable policy snapshot:
+`max_attempts`, `attempt_timeout_seconds`, `initial_backoff_seconds`,
+`max_backoff_seconds`, and `provider_order`. Timeouts, rate limits, provider 5xx
+responses, temporary unavailability, and expired leases are retried with bounded
+exponential backoff. Authentication and other client failures finish immediately.
+
+The scheduler persists `next_attempt_at` and converts only due runs into a fresh
+transactional outbox event, so a scheduler restart cannot lose a retry. A run that
+uses its retry budget becomes `DEAD_LETTERED`; its history is retained in PostgreSQL
+and a `RUN_DEAD_LETTERED` event is published to the durable
+`agent_runtime.dead_letter` queue. Malformed execution messages are rejected without
+requeue and are routed to that same queue as poison messages.
+
+The ARR-7 execution queue is `agent_runtime.execution.v2` because RabbitMQ queue
+arguments are immutable. Workers also drain the prior `agent_runtime.execution` queue
+without binding new deliveries to it, so an upgrade does not strand ARR-6 messages.

@@ -27,6 +27,7 @@ from agent_runtime.application.runs import (
     RunSnapshot,
     RunSubmissionService,
 )
+from agent_runtime.domain.retry import build_policy_snapshot
 from agent_runtime.infrastructure.database.run_service import SqlAlchemyRunService
 from agent_runtime.infrastructure.database.session import (
     create_database_engine,
@@ -166,16 +167,29 @@ def create_app(
             )
 
         try:
+            policy_snapshot = build_policy_snapshot(
+                payload.policy,
+                max_attempts=runtime_settings.retry_max_attempts,
+                attempt_timeout_seconds=runtime_settings.retry_attempt_timeout_seconds,
+                initial_backoff_seconds=runtime_settings.retry_base_delay_seconds,
+                max_backoff_seconds=runtime_settings.retry_max_backoff_seconds,
+            )
             run, replayed = await _get_service(request).submit(
                 client_id=client_id.strip(),
                 idempotency_key=_validate_idempotency_key(idempotency_key),
                 input_payload=payload.input,
-                policy_snapshot=payload.policy,
+                policy_snapshot=policy_snapshot,
             )
         except IdempotencyConflictError as exc:
             raise ApiProblem(
                 status_code=status.HTTP_409_CONFLICT,
                 code="IDEMPOTENCY_KEY_REUSED",
+                message=str(exc),
+            ) from exc
+        except ValueError as exc:
+            raise ApiProblem(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code="INVALID_RETRY_POLICY",
                 message=str(exc),
             ) from exc
 

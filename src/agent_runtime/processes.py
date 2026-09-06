@@ -99,9 +99,17 @@ async def _run_recovery(settings: Settings) -> None:
     try:
         while True:
             recovered_count = await recovery.recover_expired_leases()
+            queued_count = await recovery.schedule_due_retries()
             if recovered_count:
                 logger.info("execution_lease_recovery_complete recovered_count=%s", recovered_count)
-            await asyncio.sleep(settings.lease_recovery_poll_interval_seconds)
+            if queued_count:
+                logger.info("retry_schedule_complete queued_count=%s", queued_count)
+            await asyncio.sleep(
+                min(
+                    settings.lease_recovery_poll_interval_seconds,
+                    settings.retry_scheduler_poll_interval_seconds,
+                )
+            )
     finally:
         await engine.dispose()
 

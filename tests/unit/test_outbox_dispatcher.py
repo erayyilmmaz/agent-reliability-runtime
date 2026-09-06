@@ -4,7 +4,13 @@ import uuid
 from typing import Any
 
 from agent_runtime.infrastructure.database.models import OutboxEvent
-from agent_runtime.infrastructure.messaging.publisher import RabbitMqPublisher
+from agent_runtime.infrastructure.messaging.publisher import (
+    DEAD_LETTER_EXCHANGE_NAME,
+    DEAD_LETTER_QUEUE_NAME,
+    LEGACY_QUEUE_NAME,
+    QUEUE_NAME,
+    RabbitMqPublisher,
+)
 
 
 def _event(payload: dict[str, Any] | None = None) -> OutboxEvent:
@@ -33,3 +39,10 @@ def test_outbox_message_discards_invalid_trace_context() -> None:
         ]
         == {}
     )
+
+
+def test_retry_topology_uses_separate_execution_and_dead_letter_queues() -> None:
+    assert QUEUE_NAME.endswith(".v2")
+    assert LEGACY_QUEUE_NAME == "agent_runtime.execution"
+    assert DEAD_LETTER_EXCHANGE_NAME.endswith(".dlx")
+    assert DEAD_LETTER_QUEUE_NAME.endswith(".dead_letter")
