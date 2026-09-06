@@ -1,1 +1,1 @@
-"""Provider adapters; ARR-8 introduces provider implementations."""
+"""Provider adapter contracts and implementations."""

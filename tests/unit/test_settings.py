@@ -34,3 +34,10 @@ def test_settings_reject_invalid_configuration(field: str, value: str | int) -> 
 def test_api_key_mode_requires_token() -> None:
     with pytest.raises(ValidationError, match="auth_token"):
         Settings(auth_mode="api_key")
+
+
+def test_openai_settings_keep_key_optional_until_provider_is_selected() -> None:
+    settings = Settings(openai_default_model="gpt-5")
+
+    assert settings.openai_api_key is None
+    assert str(settings.openai_base_url) == "https://api.openai.com/v1"

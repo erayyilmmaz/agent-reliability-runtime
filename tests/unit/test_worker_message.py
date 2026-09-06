@@ -64,6 +64,7 @@ async def test_worker_applies_attempt_timeout_and_records_retryable_code() -> No
             "max_backoff_seconds": 5,
             "provider_order": ["deterministic"],
         },
+        provider="deterministic",
     )
 
     assert await worker._execute_claim(claim)

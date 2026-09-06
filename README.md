@@ -137,3 +137,15 @@ requeue and are routed to that same queue as poison messages.
 The ARR-7 execution queue is `agent_runtime.execution.v2` because RabbitMQ queue
 arguments are immutable. Workers also drain the prior `agent_runtime.execution` queue
 without binding new deliveries to it, so an upgrade does not strand ARR-6 messages.
+
+## Provider adapters
+
+Workers resolve the current attempt's provider from the immutable `provider_order`.
+`deterministic` remains the default safe local adapter. The first real adapter is
+OpenAI Responses: set `APP_OPENAI_API_KEY` only in the worker environment and submit
+`policy.provider_order: ["openai"]`. Its input requires either `input.prompt` or
+`input.messages`; optional `policy.model`, `policy.instructions`, and
+`policy.max_output_tokens` are allowlisted. The adapter calls `/v1/responses` with
+`store: false`, stores only response ID/model/text/token counts, and never persists a
+provider error body or API key. HTTP 429 and 5xx responses preserve their status for
+the retry classifier; 401/403 and malformed provider input finish without retry.

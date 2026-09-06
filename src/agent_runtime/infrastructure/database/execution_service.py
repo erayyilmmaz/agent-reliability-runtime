@@ -42,10 +42,14 @@ class ExecutionPersistenceService:
                     return ClaimResult(decision=ClaimDecision.NOT_READY, run_id=run.id)
 
                 attempt_number = await self._next_attempt_number(session, run.id)
+                retry_policy = RetryPolicy.from_snapshot(run.policy_snapshot)
+                provider = retry_policy.provider_order[
+                    min(attempt_number - 1, len(retry_policy.provider_order) - 1)
+                ]
                 attempt = RunAttempt(
                     run_id=run.id,
                     attempt_number=attempt_number,
-                    provider="deterministic",
+                    provider=provider,
                     worker_id=worker_id,
                 )
                 run.execution_status = ExecutionStatus.RUNNING
@@ -68,6 +72,7 @@ class ExecutionPersistenceService:
                     attempt_id=attempt.id,
                     input_payload=run.input_payload,
                     policy_snapshot=run.policy_snapshot,
+                    provider=provider,
                 )
 
     async def complete_success(
@@ -88,6 +93,7 @@ class ExecutionPersistenceService:
                 if attempt is None or attempt.run_id != run.id:
                     return False
                 attempt.provider = result.provider
+                attempt.usage_metadata = result.usage_metadata
                 attempt.finished_at = now
                 attempt.outcome = "SUCCEEDED"
                 attempt.latency_ms = int((now - attempt.started_at).total_seconds() * 1000)

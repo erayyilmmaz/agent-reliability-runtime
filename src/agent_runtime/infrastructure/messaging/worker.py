@@ -26,7 +26,11 @@ from agent_runtime.infrastructure.messaging.publisher import (
 
 class WorkerExecutor(Protocol):
     async def execute(
-        self, *, input_payload: dict[str, Any], policy_snapshot: dict[str, Any]
+        self,
+        *,
+        provider: str,
+        input_payload: dict[str, Any],
+        policy_snapshot: dict[str, Any],
     ) -> ExecutionResult: ...
 
 
@@ -108,12 +112,18 @@ class RabbitMqWorker:
             raise
 
     async def _execute_claim(self, claim: ClaimResult) -> bool:
-        if claim.attempt_id is None or claim.input_payload is None or claim.policy_snapshot is None:
+        if (
+            claim.attempt_id is None
+            or claim.input_payload is None
+            or claim.policy_snapshot is None
+            or claim.provider is None
+        ):
             raise RuntimeError("Claimed run must include attempt and execution payload")
         try:
             retry_policy = RetryPolicy.from_snapshot(claim.policy_snapshot)
             result = await asyncio.wait_for(
                 self._executor.execute(
+                    provider=claim.provider,
                     input_payload=claim.input_payload, policy_snapshot=claim.policy_snapshot
                 ),
                 timeout=retry_policy.attempt_timeout_seconds,

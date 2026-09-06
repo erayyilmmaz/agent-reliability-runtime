@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     )
     redis_url: AnyUrl = AnyUrl("redis://localhost:6379/0")
     rabbitmq_url: AnyUrl = AnyUrl("amqp://runtime:runtime@localhost:5672/")
+    openai_api_key: SecretStr | None = None
+    openai_base_url: AnyUrl = AnyUrl("https://api.openai.com/v1")
+    openai_default_model: str = Field(default="gpt-5", min_length=1, max_length=128)
     auth_mode: Literal["disabled", "api_key"] = "disabled"
     auth_token: SecretStr | None = None
     worker_concurrency: int = Field(default=4, ge=1, le=128)

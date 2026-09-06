@@ -21,9 +21,11 @@ class ClaimResult:
     attempt_id: uuid.UUID | None = None
     input_payload: dict[str, Any] | None = None
     policy_snapshot: dict[str, Any] | None = None
+    provider: str | None = None
 
 
 @dataclass(frozen=True)
 class ExecutionResult:
     provider: str
     result_payload: dict[str, Any]
+    usage_metadata: dict[str, Any] | None = None

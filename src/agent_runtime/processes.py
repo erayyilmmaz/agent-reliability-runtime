@@ -6,7 +6,6 @@ import socket
 
 import uvicorn
 
-from agent_runtime.execution.deterministic import DeterministicExecutor
 from agent_runtime.infrastructure.database.execution_service import ExecutionPersistenceService
 from agent_runtime.infrastructure.database.session import (
     create_database_engine,
@@ -15,6 +14,9 @@ from agent_runtime.infrastructure.database.session import (
 from agent_runtime.infrastructure.messaging.dispatcher import OutboxDispatcher
 from agent_runtime.infrastructure.messaging.publisher import RabbitMqPublisher
 from agent_runtime.infrastructure.messaging.worker import RabbitMqWorker
+from agent_runtime.providers.deterministic import DeterministicProvider
+from agent_runtime.providers.openai_responses import OpenAIResponsesProvider
+from agent_runtime.providers.registry import ProviderRegistry
 from agent_runtime.settings import Settings, get_settings
 
 
@@ -76,7 +78,16 @@ async def _run_worker(settings: Settings) -> None:
         execution_service=ExecutionPersistenceService(
             create_session_factory(engine), lease_seconds=settings.execution_lease_seconds
         ),
-        executor=DeterministicExecutor(),
+        executor=ProviderRegistry(
+            [
+                DeterministicProvider(),
+                OpenAIResponsesProvider(
+                    api_key=settings.openai_api_key,
+                    base_url=str(settings.openai_base_url),
+                    default_model=settings.openai_default_model,
+                ),
+            ]
+        ),
     )
     try:
         await worker.run()
