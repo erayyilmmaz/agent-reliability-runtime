@@ -1,0 +1,104 @@
+name: agent-reliability-runtime
+
+x-runtime: &runtime
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  environment:
+    APP_DATABASE_URL: postgresql+asyncpg://runtime:runtime@postgres:5432/agent_runtime
+    APP_REDIS_URL: redis://redis:6379/0
+    APP_RABBITMQ_URL: amqp://runtime:runtime@rabbitmq:5672/
+    APP_AUTH_MODE: disabled
+    APP_WORKER_CONCURRENCY: 4
+    APP_PROVIDER_TIMEOUT_SECONDS: 60
+    APP_RETRY_MAX_ATTEMPTS: 3
+    APP_RETRY_BASE_DELAY_SECONDS: 1
+    APP_OTEL_ENDPOINT: http://otel-collector:4318
+    APP_LOG_LEVEL: INFO
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+
+services:
+  api:
+    <<: *runtime
+    command: ["agent-runtime-api"]
+    ports:
+      - "8000:8000"
+
+  worker:
+    <<: *runtime
+    command: ["agent-runtime-worker"]
+
+  dispatcher:
+    <<: *runtime
+    command: ["agent-runtime-dispatcher"]
+
+  scheduler:
+    <<: *runtime
+    command: ["agent-runtime-recovery"]
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: agent_runtime
+      POSTGRES_USER: runtime
+      POSTGRES_PASSWORD: runtime
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U runtime -d agent_runtime"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: runtime
+      RABBITMQ_DEFAULT_PASS: runtime
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./docker/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4318:4318"
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus

@@ -36,9 +36,10 @@ by idempotent worker processing; V0 does not claim exactly-once execution.
 
 ## Current milestone
 
-The repository currently contains the ARR-1 architecture baseline. It defines
-the product contract before implementation begins. The next milestone is
-durable run persistence and `POST /runs` returning `202 Accepted`.
+ARR-2 establishes the FastAPI project, four isolated runtime entry points,
+configuration validation, migrations, local Docker Compose services, and the
+initial deterministic test suite. The next milestone is durable run persistence
+and `POST /runs` returning `202 Accepted`.
 
 ## Source-of-truth documents
 
@@ -55,6 +56,29 @@ durable run persistence and `POST /runs` returning `202 Accepted`.
 - pytest, pytest-asyncio, deterministic fake providers
 - Docker, Docker Compose, GitHub Actions
 
-Implementation, local-development instructions, and Docker configuration are
-introduced with ARR-2; this repository deliberately has no runnable runtime
-yet.
+## Local development
+
+Prerequisites: Docker Desktop, Python 3.12+, and [uv](https://docs.astral.sh/uv/).
+
+```bash
+cp .env.example .env
+make dev
+```
+
+The Compose stack starts the API on `http://localhost:8000`, PostgreSQL, Redis,
+RabbitMQ, OpenTelemetry Collector, Prometheus, and Grafana. API, worker,
+outbox-dispatcher, and scheduler/recovery run as separate commands from the
+same application image.
+
+Use the following deterministic checks during development:
+
+```bash
+make test
+make lint
+make format-check
+make migrate
+make down
+```
+
+The API currently exposes `GET /healthz`; actual run submission is introduced
+in ARR-4 after the ARR-3 persistence model is complete.

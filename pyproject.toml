@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-reliability-runtime"
+version = "0.1.0"
+description = "A durable, observable runtime for asynchronous AI agent work."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "aio-pika>=9.5,<10",
+  "alembic>=1.14,<2",
+  "asyncpg>=0.30,<1",
+  "fastapi>=0.115,<1",
+  "opentelemetry-api>=1.30,<2",
+  "opentelemetry-sdk>=1.30,<2",
+  "pydantic-settings>=2.7,<3",
+  "redis>=5.2,<7",
+  "sqlalchemy[asyncio]>=2.0,<3",
+  "uvicorn[standard]>=0.32,<1",
+]
+
+[dependency-groups]
+dev = [
+  "httpx>=0.28,<1",
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+agent-runtime-api = "agent_runtime.processes:run_api"
+agent-runtime-dispatcher = "agent_runtime.processes:run_dispatcher"
+agent-runtime-worker = "agent_runtime.processes:run_worker"
+agent-runtime-recovery = "agent_runtime.processes:run_recovery"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_runtime"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
