@@ -27,7 +27,8 @@ make coverage
 make smoke
 ```
 
-`make smoke` starts the local Compose stack, applies migrations, submits a
+`make smoke` starts the local Compose stack, waits for its migration service,
+submits a
 credentials-free deterministic run, waits for success, then stops the stack.
 For an interactive demo, use `make dev` instead and open Grafana at
 `http://localhost:3000`; the provisioned **Agent Reliability Runtime** dashboard

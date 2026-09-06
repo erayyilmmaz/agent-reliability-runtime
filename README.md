@@ -68,10 +68,11 @@ cp .env.example .env
 make dev
 ```
 
-The Compose stack starts the API on `http://localhost:8000`, PostgreSQL, Redis,
-RabbitMQ, OpenTelemetry Collector, Prometheus, and Grafana. API, worker,
-outbox-dispatcher, and scheduler/recovery run as separate commands from the
-same application image.
+The Compose stack starts PostgreSQL, Redis, and RabbitMQ; runs Alembic
+migrations to completion; then starts the API on `http://localhost:8000`,
+OpenTelemetry Collector, Prometheus, Grafana, worker, outbox-dispatcher, and
+scheduler/recovery. Application processes never start against an unmigrated
+database.
 
 Use the following deterministic checks during development:
 
@@ -79,7 +80,6 @@ Use the following deterministic checks during development:
 make test
 make lint
 make format-check
-make migrate
 make down
 ```
 
@@ -95,8 +95,8 @@ RabbitMQ → worker path.
 make smoke
 ```
 
-For an interactive session, run `make dev`, apply migrations in another
-terminal with `make migrate`, then submit a run:
+For an interactive session, run `make dev`, wait until the migration service
+has completed, then submit a run:
 
 ```bash
 curl -X POST http://localhost:8000/v1/runs \

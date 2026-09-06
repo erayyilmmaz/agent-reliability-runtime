@@ -34,8 +34,6 @@ for _ in $(seq 1 30); do
 done
 curl --fail --silent --show-error "$arr_health_url" >/dev/null
 
-docker compose exec -T api alembic upgrade head
-
 arr_response=$(curl --fail --silent --show-error -X POST "$arr_api_url" \
   -H 'Content-Type: application/json' \
   -H 'X-Client-Id: compose-smoke' \

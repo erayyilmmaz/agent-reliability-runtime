@@ -34,24 +34,36 @@ x-runtime: &runtime
     rabbitmq:
       condition: service_healthy
 
+x-migration-dependency: &migration-dependency
+  migrate:
+    condition: service_completed_successfully
+
 services:
+  migrate:
+    <<: *runtime
+    command: ["alembic", "upgrade", "head"]
+
   api:
     <<: *runtime
     command: ["agent-runtime-api"]
+    depends_on: *migration-dependency
     ports:
       - "8000:8000"
 
   worker:
     <<: *runtime
     command: ["agent-runtime-worker"]
+    depends_on: *migration-dependency
 
   dispatcher:
     <<: *runtime
     command: ["agent-runtime-dispatcher"]
+    depends_on: *migration-dependency
 
   scheduler:
     <<: *runtime
     command: ["agent-runtime-recovery"]
+    depends_on: *migration-dependency
 
   postgres:
     image: postgres:17-alpine
