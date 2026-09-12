@@ -2,6 +2,6 @@ apiVersion: v2
 name: agent-reliability-runtime
 description: Durable agent execution runtime with separate API and worker processes.
 type: application
-version: 0.2.0
+version: 0.3.0
 appVersion: "0.1.0"
 kubeVersion: ">=1.23.0-0"

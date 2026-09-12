@@ -101,3 +101,56 @@ k3d image import agent-reliability-runtime:dev -c arr
 Then use the same namespace, Secret, local dependency, Helm install, and
 verification commands above. For a remote registry, set `image.repository`,
 `image.tag`, and `imagePullSecrets` in a non-secret deployment values file.
+
+
+## Scaling the API (PERF-010 / PERF-009)
+
+One API pod runs one uvicorn process on one asyncio event loop, so it saturates
+at **one CPU core** — measured at ~103% CPU and ~450-500 RPS per pod. Giving a
+pod more CPU does nothing; capacity comes from replicas.
+
+The chart therefore sets `api.resources.requests == limits == 1` CPU
+(Guaranteed QoS) and ships an API `HorizontalPodAutoscaler`, disabled by
+default.
+
+### Before enabling the autoscaler: check the connection ceiling
+
+Every process opens its own PostgreSQL pool. The cluster-wide ceiling is:
+
+```
+(api + worker + dispatcher + scheduler replicas) × (dbPoolSize + dbMaxOverflow)
+    must stay below PostgreSQL max_connections
+```
+
+With the shipped defaults:
+
+| Scenario | Arithmetic | Total | Default `max_connections` 100 |
+| -------- | ---------- | ----: | ----------------------------- |
+| No autoscaling | `(2+2+1+1) × 10` | 60 | Fits |
+| API autoscaler at max | `(4+2+1+1) × 10` | 80 | Fits |
+| **Both autoscalers at max** | `(4+10+1+1) × 10` | **160** | **Exceeds — do not enable as-is** |
+
+To run both autoscalers, do one of:
+
+- raise `max_connections` on the database (and size its memory accordingly),
+- lower `config.dbPoolSize` / `config.dbMaxOverflow` — measured need is 1-2
+  active connections per API pod at 400+ RPS, so there is room, or
+- put PgBouncer in transaction-pooling mode between the runtime and PostgreSQL.
+
+```bash
+helm upgrade --install arr charts/agent-reliability-runtime \
+  --set api.autoscaling.enabled=true \
+  --set api.autoscaling.maxReplicas=4 \
+  --set config.dbPoolSize=5 \
+  --set config.dbMaxOverflow=5
+```
+
+Verify after rollout:
+
+```bash
+kubectl get hpa
+psql "$ADMIN_URL" -c \
+  "SELECT count(*), max_conn FROM pg_stat_activity,
+   (SELECT setting::int AS max_conn FROM pg_settings WHERE name='max_connections') s
+   GROUP BY max_conn;"
+```

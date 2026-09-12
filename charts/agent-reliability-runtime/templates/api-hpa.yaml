@@ -1,0 +1,41 @@
+{{- if .Values.api.autoscaling.enabled }}
+{{- /*
+PERF-INF-01: the API is single-threaded per pod - one uvicorn process, one
+asyncio event loop, one core. Measured saturation is ~103% CPU at ~500 RPS, so
+vertical headroom does nothing and scaling is horizontal by definition.
+
+Before enabling this, check the connection arithmetic in
+docs/performance-audit.md. Every replica opens its own pool, and PostgreSQL's
+default max_connections is 100:
+
+  (api + worker + dispatcher + scheduler) x (db_pool_size + db_max_overflow)
+
+An autoscaler that outruns that ceiling takes the database down instead of
+serving more traffic.
+*/ -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "agent-reliability-runtime.fullname" . }}-api
+  labels:
+    {{- include "agent-reliability-runtime.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "agent-reliability-runtime.fullname" . }}-api
+  minReplicas: {{ .Values.api.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.api.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.api.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      # The API holds no per-pod state, but connection pools take time to drain.
+      stabilizationWindowSeconds: 300
+{{- end }}

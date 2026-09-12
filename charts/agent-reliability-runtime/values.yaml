@@ -99,6 +99,10 @@ config:
   otelEndpoint: http://otel-collector:4318
   # SEC-TRAN-01: staging/production reject redis:// and amqp:// unless this
   # is deliberately turned on (for example an in-cluster kind demo).
+  # PERF-009: per-process pool. Cluster ceiling is
+  #   (all replicas) x (dbPoolSize + dbMaxOverflow) < max_connections
+  dbPoolSize: 5
+  dbMaxOverflow: 5
   allowPlaintextTransport: false
   heartbeatIntervalSeconds: 10
   logLevel: INFO
@@ -108,13 +112,28 @@ api:
   service:
     type: ClusterIP
     port: 8000
+  # PERF-INF-01: calibrated against measurement, not guessed. One pod runs one
+  # uvicorn process on one asyncio event loop and saturates at ~103% CPU /
+  # ~500 RPS, using ~118 MiB. requests == limits gives Guaranteed QoS and
+  # predictable latency; more CPU than this cannot be used by a single pod.
+  #
+  # The previous limit of 500m was ~6% of what the pre-PERF-001 code needed, so
+  # every replica was CPU-throttled - which looks exactly like application
+  # slowness and is the classic misdiagnosis.
   resources:
     requests:
-      cpu: 100m
+      cpu: "1"
       memory: 256Mi
     limits:
-      cpu: 500m
+      cpu: "1"
       memory: 512Mi
+  autoscaling:
+    # Disabled by default: read the connection-ceiling note in
+    # templates/api-hpa.yaml before turning this on.
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
 
 worker:
   replicaCount: 2

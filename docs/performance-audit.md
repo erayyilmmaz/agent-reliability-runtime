@@ -905,6 +905,80 @@ before choosing numbers.
 
 **Effort:** Low | **Risk:** Low | **Priority:** **P2** (re-evaluate after P0)
 
+#### ✅ Resolved — but for a different reason than predicted
+
+The prediction above was **wrong on its stated mechanism**. After PERF-001 the
+pool was measured, not assumed: at 400+ RPS only **1-2 of 11-12** pooled
+connections were active and PostgreSQL sat at ~32% CPU. The pool never became
+the request-path bottleneck; a single asyncio event loop on one core did.
+
+The finding survives for a different reason — **arithmetic, not contention**.
+Each process opens its own pool, and the shipped chart runs four kinds of them:
+
+| | Per-process pool | Processes | Total | vs `max_connections` 100 |
+| - | ---: | ---: | ---: | --- |
+| Before | 5 + 10 = 15 | 2 api + 2 worker + 1 + 1 = 6 | **90** | No headroom to scale at all |
+| After | 5 + 5 = 10 | 4 api + 2 worker + 1 + 1 = 8 | **80** | Autoscaling fits |
+
+So the pool was never too small — it was too large to scale behind. The engine
+now takes `db_pool_size` / `db_max_overflow` from settings instead of
+SQLAlchemy's defaults, and the ceiling is asserted by
+`tests/unit/test_connection_pool.py`.
+
+**This had to land before the API autoscaler.** An HPA on top of the previous
+defaults would have exhausted PostgreSQL instead of serving more traffic.
+
+---
+
+### PERF-010 — A single API pod cannot use more than one core
+
+**Severity:** High | **Confidence:** Confirmed | **Category:** Concurrency / Infrastructure
+**Status:** Confirmed Bottleneck — **found by measurement after PERF-001, not in the original audit**
+**Affected Component:** `src/agent_runtime/processes.py:33` (`uvicorn.run`), Helm `api` resources
+
+**Evidence:** With the KDF removed, the API container settles at **~103% CPU** —
+one saturated core — while PostgreSQL is at ~32%, Redis ~1%, and k6 (the
+generator) ~10%. Throughput plateaus around 400-500 RPS per pod and no
+additional concurrency raises it.
+
+**Root cause:** One uvicorn process runs one asyncio event loop. Before
+PERF-001 this was hidden: the KDF was offloaded to the anyio threadpool and
+`pbkdf2_hmac` releases the GIL, so the container genuinely used ~850% CPU.
+Remove that work and the remaining request handling is ordinary Python on a
+single loop, which is single-core by construction.
+
+**Why not `uvicorn --workers N`:** rejected after inspection.
+`_configure_process_observability()` runs inside `run_api()` in the parent
+process. With `workers > 1`, uvicorn's children import the app factory fresh and
+never execute `run_api`, so structured logging and OTel would be silently
+unconfigured in every worker. Fixing that means moving observability setup into
+the app factory, which then also runs in every test that calls `create_app()`.
+Horizontal scaling avoids the problem entirely and is what Kubernetes is for.
+
+**Recommendation (implemented):** scale by replica, and size the pod to what one
+replica can actually use.
+
+- `api.resources` set to `requests == limits == 1` CPU. The previous `500m`
+  limit throttled the pod to roughly 6% of what the pre-PERF-001 code needed;
+  more than `1` cannot be used by a single event loop. Equal requests and
+  limits also give Guaranteed QoS and more predictable latency.
+- An API `HorizontalPodAutoscaler` mirroring the existing worker HPA, **disabled
+  by default**, with `maxReplicas: 4` chosen to fit the connection ceiling above
+  and a 300 s scale-down stabilisation window so pools drain.
+
+**Expected benefit:** capacity becomes `replicas × ~450 RPS` instead of a fixed
+~450 RPS. Removes the guaranteed CPU throttling that the old limit caused.
+
+**Effort:** Low | **Risk:** Low | **Priority:** **P1**
+
+> **Operator note.** Enabling *both* autoscalers at their defaults
+> (`api.maxReplicas: 4`, `worker.maxReplicas: 10`) gives
+> `(4 + 10 + 1 + 1) × 10 = 160` connections, which exceeds PostgreSQL's default
+> 100. Raise `max_connections`, lower the pools, or put PgBouncer in front
+> before enabling both. This is stated rather than silently defaulted around:
+> there is no pool setting that makes both autoscalers safe against a default
+> PostgreSQL.
+
 ---
 
 ## 16. What Was Not Tested

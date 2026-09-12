@@ -22,6 +22,14 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime"
     )
     migration_database_url: AnyUrl | None = None
+    # PERF-009: every process opens its own pool, so the cluster-wide ceiling is
+    #   (api + worker + dispatcher + scheduler replicas) x (pool_size + max_overflow)
+    # and it must stay below PostgreSQL's max_connections. Measured need is tiny:
+    # 1-2 connections were active at 400+ RPS, so the defaults are deliberately
+    # small. See docs/security/least-privilege.md and the scaling section of
+    # docs/performance-audit.md before raising them.
+    db_pool_size: int = Field(default=5, ge=1, le=50)
+    db_max_overflow: int = Field(default=5, ge=0, le=50)
     redis_url: AnyUrl = AnyUrl("redis://localhost:6379/0")
     rabbitmq_url: AnyUrl = AnyUrl("amqp://runtime:runtime@localhost:5672/")
     allow_plaintext_transport: bool = False
