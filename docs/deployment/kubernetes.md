@@ -106,8 +106,9 @@ verification commands above. For a remote registry, set `image.repository`,
 ## Scaling the API (PERF-010 / PERF-009)
 
 One API pod runs one uvicorn process on one asyncio event loop, so it saturates
-at **one CPU core** — measured at ~103% CPU and ~450-500 RPS per pod. Giving a
-pod more CPU does nothing; capacity comes from replicas.
+at **one CPU core** — measured at ~103% CPU. Sustained throughput at saturation
+is ~650-700 RPS per pod, peaking near 880 RPS at low concurrency. Giving a pod
+more CPU does nothing; capacity comes from replicas.
 
 The chart therefore sets `api.resources.requests == limits == 1` CPU
 (Guaranteed QoS) and ships an API `HorizontalPodAutoscaler`, disabled by
@@ -178,7 +179,7 @@ misconfiguration cannot switch admission control off; they are not tuning
 targets.
 
 **The default rate limit is one request per second, per principal.** 60
-requests over a 60 s fixed window. A pod serves ~450-500 RPS, so at defaults a
+requests over a 60 s fixed window. A pod sustains ~650-700 RPS, so at defaults a
 single caller reaches well under 1% of one pod, and the measured throughput
 figures in `docs/performance-audit.md` are only reachable because
 `performance-tests/docker-compose.perf.yml` raises the ceiling

@@ -1220,7 +1220,8 @@ capacity ceilings".
 
 Writing it up surfaced one number worth stating plainly. **The default rate
 limit is 60 requests per 60 s per principal — one request per second.** A pod
-serves ~450-500 RPS, so at defaults a single caller reaches under 1% of one pod,
+sustains ~650-700 RPS, so at defaults a single caller reaches well under 1% of
+one pod,
 and every throughput figure in this report is only reachable because the perf
 overlay raises `APP_RATE_LIMIT_REQUESTS` to 10,000. For a real integration that
 limit, not capacity, is the first thing hit, and it arrives as `429` rather than

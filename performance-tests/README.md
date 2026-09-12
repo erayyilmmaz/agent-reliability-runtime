@@ -156,16 +156,25 @@ checks_succeeded: 100.00%   http_req_failed: 0.00%
 ```
 
 Indicative figures on the reference workstation (10 cores; see §2 of the
-report). **Post-remediation** - PERF-001 through PERF-003 are in:
+report), with `ARR_PERF_RATE_WINDOW=1` so the rate limiter is not what is being
+measured. **Post-remediation** — PERF-001 through PERF-011 are in:
 
-| Scenario | Observation |
-| -------- | ----------- |
-| read sweep, 1 VU | ≈ 424 RPS, p50 ≈ 2.2 ms |
-| read sweep, 5 VU | ≈ 500-670 RPS, p50 ≈ 7-9 ms |
-| read sweep, peak | ≈ 500-670 RPS, then flat at one saturated core |
-| smoke (1 VU, authenticated) | read p50 ≈ 2-3 ms |
+| Scenario | RPS | p50 |
+| -------- | --: | --: |
+| read sweep, 1 VU | ≈ 573 | ≈ 1.6 ms |
+| read sweep, 5 VU (peak) | ≈ 880-900 | ≈ 5.3 ms |
+| read sweep, 10-25 VU | ≈ 800-840 | 11-30 ms |
+| read sweep, 50-200 VU | ≈ 630-690, flat | 75-280 ms |
+| smoke (1 VU, authenticated) | — | read p50 ≈ 2-3 ms |
 
-For reference, the same sweep before the remediations: 14.6 RPS at 1 VU with a
+Throughput peaks near 5 VUs and settles about 25% below that once the single
+event loop is saturated (PERF-010). What matters is that it stays **flat** from
+50 to 200 VUs with 0.00% errors while latency grows linearly — a server that
+queues rather than collapses. An earlier revision of this table quoted
+≈ 500-670 RPS; that was measured while connection-pool overflow was still
+enabled, which cost 61% of throughput in the 10-25 VU band (PERF-011).
+
+For reference, the same sweep before any remediation: 14.6 RPS at 1 VU with a
 66 ms p50, peaking at 71 RPS. Those numbers are what the audit measured and are
 kept in the report for the before/after comparison.
 
@@ -244,6 +253,9 @@ established:
 | A rejected submission creates no run, outbox row or attempt | PERF-004 |
 | Alert thresholds sit inside their histogram's bucket range | PERF-OBS-02 |
 | Connection ceiling fits `max_connections` | PERF-009 |
+| Pool overflow stays disabled | PERF-011 |
+| Audit purge holds no lock stronger than `RowExclusiveLock` | PERF-005 |
+| Compression runs inside the latency middleware | PERF-006 / PERF-007 |
 
 Each of those was verified to fail when its remediation is reverted - a gate
 that has never failed is a gate nobody has tested.
