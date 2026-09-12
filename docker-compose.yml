@@ -11,6 +11,7 @@ x-runtime: &runtime
     APP_OPENAI_BASE_URL: https://api.openai.com/v1
     APP_OPENAI_DEFAULT_MODEL: gpt-5
     APP_AUTH_MODE: disabled
+    APP_ENVIRONMENT: local
     APP_WORKER_CONCURRENCY: 4
     APP_PROVIDER_TIMEOUT_SECONDS: 60
     APP_RETRY_MAX_ATTEMPTS: 3

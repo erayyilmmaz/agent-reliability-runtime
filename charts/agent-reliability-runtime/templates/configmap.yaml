@@ -5,6 +5,7 @@ metadata:
   labels:
     {{- include "agent-reliability-runtime.labels" . | nindent 4 }}
 data:
+  APP_ENVIRONMENT: {{ .Values.config.environment | quote }}
   APP_AUTH_MODE: {{ .Values.config.authMode | quote }}
   APP_OPENAI_BASE_URL: {{ .Values.config.openaiBaseUrl | quote }}
   APP_OPENAI_DEFAULT_MODEL: {{ .Values.config.openaiDefaultModel | quote }}

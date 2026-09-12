@@ -15,7 +15,7 @@ the Secret named by `existingSecret.name`; it must contain the application
 variables below:
 
 - `APP_DATABASE_URL`, `APP_REDIS_URL`, `APP_RABBITMQ_URL`
-- `APP_AUTH_API_KEY_HASH` when `config.authMode=api_key`
+- `APP_AUTH_CREDENTIALS` and `APP_AUTH_PEPPER` when `config.authMode=api_key`
 - optionally `APP_OPENAI_API_KEY`
 
 For the supplied local dependencies it additionally needs `POSTGRES_DB`,
@@ -37,8 +37,8 @@ kubectl create namespace arr
 
 export ARR_POSTGRES_PASSWORD='replace-local-postgres-password'
 export ARR_RABBITMQ_PASSWORD='replace-local-rabbitmq-password'
-export ARR_API_KEY='replace-local-api-key'
-export ARR_API_KEY_HASH="$(printf %s "$ARR_API_KEY" | shasum -a 256 | awk '{print $1}')"
+# Follow docs/security/credentials.md to provision APP_AUTH_CREDENTIALS and
+# APP_AUTH_PEPPER in this shell. Deliver the generated API key to the caller.
 
 kubectl -n arr create secret generic agent-reliability-runtime-secrets \
   --from-literal=POSTGRES_DB=agent_runtime \
@@ -49,7 +49,8 @@ kubectl -n arr create secret generic agent-reliability-runtime-secrets \
   --from-literal=APP_DATABASE_URL="postgresql+asyncpg://runtime:$ARR_POSTGRES_PASSWORD@postgres:5432/agent_runtime" \
   --from-literal=APP_REDIS_URL=redis://redis:6379/0 \
   --from-literal=APP_RABBITMQ_URL="amqp://runtime:$ARR_RABBITMQ_PASSWORD@rabbitmq:5672/" \
-  --from-literal=APP_AUTH_API_KEY_HASH="$ARR_API_KEY_HASH"
+  --from-literal=APP_AUTH_CREDENTIALS="$APP_AUTH_CREDENTIALS" \
+  --from-literal=APP_AUTH_PEPPER="$APP_AUTH_PEPPER"
 
 kubectl -n arr apply -f deploy/kubernetes/local-dependencies.yaml
 kubectl -n arr rollout status deployment/postgres --timeout=180s
@@ -75,7 +76,8 @@ kubectl -n arr port-forward service/arr-agent-reliability-runtime-api 8000:8000
 curl http://localhost:8000/healthz
 ```
 
-In another terminal, submit a deterministic run using `X-API-Key: $ARR_API_KEY`.
+In another terminal, submit a deterministic run using `X-API-Key` with the
+raw API key delivered by credential provisioning.
 Set `worker.autoscaling.enabled=true` where a metrics-server is available to
 install the worker HPA. The API is intentionally a separate deployment and is
 not affected by worker scaling.

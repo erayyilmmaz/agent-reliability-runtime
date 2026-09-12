@@ -29,7 +29,8 @@ def run_api() -> None:
     telemetry = _configure_process_observability(settings, "agent-runtime-api")
     try:
         uvicorn.run(
-            "agent_runtime.api.main:app",
+            "agent_runtime.api.main:create_app",
+            factory=True,
             host="0.0.0.0",
             port=8000,
             log_level=settings.log_level.lower(),

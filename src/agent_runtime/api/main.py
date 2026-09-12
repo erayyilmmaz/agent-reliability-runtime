@@ -4,6 +4,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Annotated, Any, cast
 from uuid import UUID
 
@@ -11,6 +12,7 @@ from fastapi import FastAPI, Header, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
+from starlette.concurrency import run_in_threadpool
 
 from agent_runtime.api.schemas import (
     ApiErrorResponse,
@@ -63,9 +65,11 @@ from agent_runtime.security import (
     SqlAlchemySecurityAuditSink,
     authenticate_api_key,
 )
+from agent_runtime.security.credentials import CLIENT_ID_PATTERN
 from agent_runtime.settings import Settings, get_settings
 
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,254}$")
+PUBLIC_ENDPOINTS = frozenset({("GET", "/healthz")})
 
 
 class ApiProblem(Exception):
@@ -200,7 +204,15 @@ def create_app(
         if engine is not None:
             await engine.dispose()
 
-    app = FastAPI(title="Agent Reliability Runtime", version="0.1.0", lifespan=lifespan)
+    local_docs = runtime_settings.auth_mode == "disabled"
+    app = FastAPI(
+        title="Agent Reliability Runtime",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url="/docs" if local_docs else None,
+        redoc_url="/redoc" if local_docs else None,
+        openapi_url="/openapi.json" if local_docs else None,
+    )
     app.state.settings = runtime_settings
     app.state.run_service = run_service
 
@@ -233,9 +245,21 @@ def create_app(
 
     @app.middleware("http")
     async def enforce_security_boundary(request: Request, call_next: Any) -> Any:
-        if not request.url.path.startswith("/v1/"):
+        if (request.method, request.url.path) in PUBLIC_ENDPOINTS:
             return await call_next(request)
-        client_id = request.headers.get("X-Client-Id")
+        caller_client_ids = request.headers.getlist("X-Client-Id")
+        caller_client_id = caller_client_ids[0] if caller_client_ids else None
+        if len(caller_client_ids) > 1 or (
+            caller_client_id is not None
+            and re.fullmatch(CLIENT_ID_PATTERN, caller_client_id) is None
+        ):
+            return _security_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "INVALID_CLIENT_ID",
+                "X-Client-Id must contain 1-128 URL-safe identity characters.",
+            )
+        # Never persist unauthenticated identity assertions in audit records.
+        client_id = None
         content_length = request.headers.get("content-length")
         if content_length is not None:
             try:
@@ -256,10 +280,13 @@ def create_app(
                     "Request body exceeds the configured limit.",
                 )
 
-        authentication = authenticate_api_key(
-            settings=runtime_settings,
-            x_api_key=request.headers.get("X-API-Key"),
-            authorization=request.headers.get("Authorization"),
+        authentication = await run_in_threadpool(
+            partial(
+                authenticate_api_key,
+                settings=runtime_settings,
+                x_api_key=request.headers.get("X-API-Key"),
+                authorization=request.headers.get("Authorization"),
+            )
         )
         if not authentication.authenticated:
             status_code = (
@@ -284,15 +311,19 @@ def create_app(
                 ),
             )
 
-        if runtime_settings.auth_mode == "api_key" and client_id is not None and client_id.strip():
+        client_id = authentication.tenant_id
+        request.state.tenant_id = client_id
+        if runtime_settings.auth_mode == "api_key":
+            if authentication.principal_id is None or client_id is None:
+                raise RuntimeError("Authenticated credential has no identity binding")
             try:
-                decision = await rate_limiter.check(client_id.strip())
+                decision = await rate_limiter.check(authentication.principal_id)
             except RateLimitUnavailable:
                 await write_security_audit(
                     event_type="RATE_LIMIT",
                     outcome="ERROR",
                     reason="RATE_LIMIT_UNAVAILABLE",
-                    client_id=client_id.strip(),
+                    client_id=client_id,
                     credential_fingerprint=authentication.credential_fingerprint,
                 )
                 return _security_error(
@@ -305,7 +336,7 @@ def create_app(
                     event_type="RATE_LIMIT",
                     outcome="DENIED",
                     reason="RATE_LIMIT_EXCEEDED",
-                    client_id=client_id.strip(),
+                    client_id=client_id,
                     credential_fingerprint=authentication.credential_fingerprint,
                 )
                 return _security_error(
@@ -320,7 +351,7 @@ def create_app(
                 event_type="AUTHENTICATION",
                 outcome="ALLOWED",
                 reason="AUTHENTICATED",
-                client_id=client_id.strip() if client_id and client_id.strip() else None,
+                client_id=client_id,
                 credential_fingerprint=authentication.credential_fingerprint,
             )
         return await call_next(request)
@@ -398,12 +429,7 @@ def create_app(
                 code="MISSING_IDEMPOTENCY_KEY",
                 message="Idempotency-Key header is required.",
             )
-        if client_id is None or not client_id.strip():
-            raise ApiProblem(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                code="MISSING_CLIENT_ID",
-                message="X-Client-Id header is required until authentication is introduced.",
-            )
+        tenant_id = _required_client_id(request, client_id)
 
         try:
             policy_snapshot = build_policy_snapshot(
@@ -416,7 +442,7 @@ def create_app(
                 | ({"openai"} if runtime_settings.openai_api_key is not None else set()),
             )
             run, replayed = await _get_service(request).submit(
-                client_id=client_id.strip(),
+                client_id=tenant_id,
                 idempotency_key=_validate_idempotency_key(idempotency_key),
                 input_payload=payload.input,
                 policy_snapshot=policy_snapshot,
@@ -453,7 +479,7 @@ def create_app(
     ) -> RunResponse:
         try:
             run = await _get_service(request).get_run(
-                client_id=_required_client_id(client_id), run_id=run_id
+                client_id=_required_client_id(request, client_id), run_id=run_id
             )
         except RunNotFoundError as exc:
             raise ApiProblem(
@@ -473,7 +499,7 @@ def create_app(
     ) -> list[AttemptResponse]:
         try:
             attempts = await _get_service(request).get_attempts(
-                client_id=_required_client_id(client_id), run_id=run_id
+                client_id=_required_client_id(request, client_id), run_id=run_id
             )
         except RunNotFoundError as exc:
             raise ApiProblem(
@@ -493,7 +519,7 @@ def create_app(
     ) -> list[EventResponse]:
         try:
             events = await _get_service(request).get_events(
-                client_id=_required_client_id(client_id), run_id=run_id
+                client_id=_required_client_id(request, client_id), run_id=run_id
             )
         except RunNotFoundError as exc:
             raise ApiProblem(
@@ -514,7 +540,9 @@ def create_app(
     ) -> EvaluationResponse:
         try:
             evaluation = await _get_service(request).evaluate(
-                client_id=_required_client_id(client_id), run_id=run_id, rules=payload.rules
+                client_id=_required_client_id(request, client_id),
+                run_id=run_id,
+                rules=payload.rules,
             )
         except RunNotFoundError as exc:
             raise ApiProblem(
@@ -540,7 +568,7 @@ def create_app(
     ) -> list[EvaluationResponse]:
         try:
             evaluations = await _get_service(request).get_evaluations(
-                client_id=_required_client_id(client_id), run_id=run_id
+                client_id=_required_client_id(request, client_id), run_id=run_id
             )
         except RunNotFoundError as exc:
             raise ApiProblem(
@@ -598,7 +626,7 @@ def create_app(
             )
         try:
             replay, replayed = await _get_service(request).replay(
-                client_id=_required_client_id(client_id),
+                client_id=_required_client_id(request, client_id),
                 run_id=run_id,
                 idempotency_key=_validate_idempotency_key(idempotency_key),
             )
@@ -624,12 +652,17 @@ def create_app(
     return app
 
 
-def _required_client_id(client_id: str | None) -> str:
+def _required_client_id(request: Request, client_id: str | None) -> str:
+    if request.app.state.settings.auth_mode == "api_key":
+        tenant_id = request.state.tenant_id
+        if not isinstance(tenant_id, str):
+            raise RuntimeError("Missing authenticated tenant")
+        return tenant_id
     if client_id is None or not client_id.strip():
         raise ApiProblem(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             code="MISSING_CLIENT_ID",
-            message="X-Client-Id header is required until authentication is introduced.",
+            message="X-Client-Id is required in local-development mode.",
         )
     return client_id.strip()
 
@@ -642,6 +675,3 @@ def _security_error(
         content={"error": {"code": code, "message": message}},
         headers=headers,
     )
-
-
-app = create_app()

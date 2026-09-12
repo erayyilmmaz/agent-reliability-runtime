@@ -16,6 +16,26 @@ concurrency:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: runtime
+          POSTGRES_PASSWORD: runtime
+          POSTGRES_DB: arr_security_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U runtime -d arr_security_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      ARR_TEST_DATABASE_URL: postgresql+asyncpg://runtime:runtime@localhost:5432/arr_security_test
+      ARR_TEST_REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6

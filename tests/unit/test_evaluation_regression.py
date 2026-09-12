@@ -117,6 +117,8 @@ def test_dataset_contract_rejects_invalid_cases(dataset: dict[str, Any]) -> None
 def test_cli_writes_machine_readable_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("APP_ENVIRONMENT", "local")
+    monkeypatch.setenv("APP_AUTH_MODE", "disabled")
     dataset_path = tmp_path / "dataset.json"
     output_path = tmp_path / "report.json"
     dataset_path.write_text(

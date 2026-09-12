@@ -33,6 +33,7 @@ class InMemoryRunService:
         self._lock = threading.Lock()
         self._runs_by_key: dict[tuple[str, str], tuple[str, RunSnapshot]] = {}
         self._runs: dict[uuid.UUID, RunSnapshot] = {}
+        self._owners: dict[uuid.UUID, str] = {}
         self.submission_count = 0
         self._evaluations: dict[uuid.UUID, list[EvaluationSnapshot]] = {}
 
@@ -69,12 +70,13 @@ class InMemoryRunService:
             )
             self._runs_by_key[key] = (request_hash, run)
             self._runs[run.id] = run
+            self._owners[run.id] = client_id
             self.submission_count += 1
             return run, False
 
     async def get_run(self, *, client_id: str, run_id: uuid.UUID) -> RunSnapshot:
         run = self._runs.get(run_id)
-        if run is None or client_id != "test-client":
+        if run is None or self._owners.get(run_id) != client_id:
             raise RunNotFoundError(f"Run {run_id} was not found")
         return run
 
@@ -135,11 +137,14 @@ class InMemoryRunService:
         )
         self._runs_by_key[key] = ("replay", replay)
         self._runs[replay.id] = replay
+        self._owners[replay.id] = client_id
         return replay, False
 
 
 def _client(service: InMemoryRunService) -> TestClient:
-    return TestClient(create_app(Settings(), run_service=service))
+    return TestClient(
+        create_app(Settings(environment="local", auth_mode="disabled"), run_service=service)
+    )
 
 
 def _routing_decision(policy_snapshot: dict[str, Any]) -> dict[str, Any] | None:
@@ -332,6 +337,7 @@ def test_evaluation_failure_does_not_change_successful_execution() -> None:
         error_code=None,
     )
     service._runs[succeeded.id] = succeeded
+    service._owners[succeeded.id] = "test-client"
     with _client(service) as client:
         response = client.post(
             f"/v1/runs/{succeeded.id}/evaluations",

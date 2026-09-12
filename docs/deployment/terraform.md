@@ -46,7 +46,7 @@ requires Terraform or a cloud account.
 - Terraform receives the name of the pre-created runtime Secret but never its
   data. Use External Secrets, a cloud secret manager, or an operator-approved
   secret process to populate `APP_DATABASE_URL`, `APP_REDIS_URL`,
-  `APP_RABBITMQ_URL`, `APP_AUTH_API_KEY_HASH`, and optional provider keys.
+  `APP_RABBITMQ_URL`, `APP_AUTH_CREDENTIALS`, `APP_AUTH_PEPPER`, and optional provider keys.
 
 ## Operational sequence
 

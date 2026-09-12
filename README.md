@@ -263,19 +263,29 @@ and estimated-cost deltas and can be triggered by CLI or
 
 ## API security boundary
 
-Production uses `APP_AUTH_MODE=api_key` and a static SHA-256 digest in
-`APP_AUTH_API_KEY_HASH`; the raw API key exists only at the caller. Send it in
-`X-API-Key` or `Authorization: Bearer <key>`, alongside `X-Client-Id`. Missing
-credentials return `401`; invalid credentials return `403`. The configured
-Redis fixed-window limit applies across API instances per hashed client ID and
-returns `429` before a run is persisted or a provider can be called.
+Authentication defaults to `api_key` and the environment defaults to `production`.
+Startup requires `APP_AUTH_CREDENTIALS` (a server-controlled credential registry)
+and an independent `APP_AUTH_PEPPER`. Each generated key maps to a principal
+and tenant. Send it in `X-API-Key` or `Authorization: Bearer <key>`; `X-Client-Id`
+is optional, validated, and does not select a tenant in authenticated mode.
+Missing credentials return `401`; invalid credentials return `403`. An atomic
+Redis fixed-window limit applies across API instances and rotated keys per
+principal, including routes without a client header. It returns `429` before
+a run is persisted or a provider can be called; Redis failure returns `503`.
+
+Only `GET /healthz` is public in API-key mode. `/docs`, `/redoc`, and
+`/openapi.json` are disabled. See [credential provisioning, rotation and legacy
+migration](docs/security/credentials.md) before upgrading an existing installation.
+The old `APP_AUTH_API_KEY_HASH` setting is no longer supported.
 
 Security audit records are append-only PostgreSQL facts for authentication and
-rate-limit outcomes. They contain only controlled event metadata, a client ID,
-and a credential fingerprint—never an API key, header, request body, provider
-response, stack trace, or configuration secret. Local Docker development stays
-explicitly in `disabled` auth mode; enable API-key mode through a local secret
-manager or deployment environment before exposing the API.
+rate-limit outcomes. New records contain controlled event metadata, the verified
+tenant ID, and a short credential-record fingerprint, never the key or its KDF
+verifier. Unauthenticated identity assertions are not stored. Anonymous operation
+requires both `APP_ENVIRONMENT=local` and `APP_AUTH_MODE=disabled`, as explicitly
+configured in local Compose. Local mode still requires a valid client header
+for run-scoped operations. Environment files are not loaded automatically by
+the Python process; export these variables when running local commands directly.
 
 ## Delivery checks
 

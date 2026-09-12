@@ -31,7 +31,7 @@ candidate's trade-offs visible.
 Run the local deterministic sample:
 
 ```bash
-uv run agent-runtime-regression \
+APP_ENVIRONMENT=local APP_AUTH_MODE=disabled uv run agent-runtime-regression \
   --dataset evaluation_datasets/v1/core.json \
   --baseline-provider deterministic \
   --candidate-provider deterministic \

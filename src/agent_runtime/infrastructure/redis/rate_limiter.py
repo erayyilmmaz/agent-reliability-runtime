@@ -1,4 +1,4 @@
-"""A Redis-backed shared fixed-window limiter keyed by a hashed client identifier."""
+"""A shared atomic fixed-window limiter keyed by the authenticated principal."""
 
 from __future__ import annotations
 
@@ -27,7 +27,17 @@ class RateLimiter(Protocol):
 
 
 class RedisFixedWindowRateLimiter:
-    """Uses Redis INCR/EXPIRE so every API instance observes the same limit."""
+    """Increment, expiry (including orphan repair), and TTL are one Redis operation."""
+
+    _SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 0 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+    ttl = tonumber(ARGV[1])
+end
+return {current, ttl}
+"""
 
     def __init__(self, *, redis_url: str, limit: int, window_seconds: int) -> None:
         self._client = redis.from_url(redis_url, decode_responses=True)
@@ -37,10 +47,9 @@ class RedisFixedWindowRateLimiter:
     async def check(self, client_id: str) -> RateLimitDecision:
         key = f"arr:rate-limit:{hashlib.sha256(client_id.encode('utf-8')).hexdigest()}"
         try:
-            current = await self._client.incr(key)
-            if current == 1:
-                await self._client.expire(key, self._window_seconds)
-            ttl = await self._client.ttl(key)
+            current, ttl = await self._client.eval(  # type: ignore[no-untyped-call]
+                self._SCRIPT, 1, key, self._window_seconds
+            )
         except RedisError as exc:
             raise RateLimitUnavailable("Redis rate limiter is unavailable") from exc
         retry_after = max(1, ttl if ttl > 0 else self._window_seconds)

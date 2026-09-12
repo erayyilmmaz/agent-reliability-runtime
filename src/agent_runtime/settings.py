@@ -4,14 +4,18 @@ import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AnyUrl, Field, SecretStr, field_validator
+from pydantic import AnyUrl, Field, PrivateAttr, SecretStr, TypeAdapter, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from agent_runtime.security.credentials import CredentialRecord
 
 
 class Settings(BaseSettings):
     """Runtime configuration read from APP_ prefixed environment variables."""
 
-    model_config = SettingsConfigDict(env_prefix="APP_", case_sensitive=False, extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="APP_", case_sensitive=False, extra="ignore", hide_input_in_errors=True
+    )
 
     database_url: AnyUrl = AnyUrl(
         "postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime"
@@ -21,8 +25,11 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     openai_base_url: AnyUrl = AnyUrl("https://api.openai.com/v1")
     openai_default_model: str = Field(default="gpt-5", min_length=1, max_length=128)
-    auth_mode: Literal["disabled", "api_key"] = "disabled"
-    auth_api_key_hash: SecretStr | None = None
+    environment: Literal["local", "test", "staging", "production"] = "production"
+    auth_mode: Literal["disabled", "api_key"] = "api_key"
+    auth_credentials: SecretStr | None = None
+    auth_pepper: SecretStr | None = None
+    _credentials: tuple[CredentialRecord, ...] = PrivateAttr(default=())
     rate_limit_requests: int = Field(default=60, ge=1, le=10_000)
     rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
     max_request_bytes: int = Field(default=131_072, ge=1_024, le=1_048_576)
@@ -63,16 +70,38 @@ class Settings(BaseSettings):
             raise ValueError("rabbitmq_url must use amqp or amqps")
         return value
 
-    @field_validator("auth_api_key_hash")
-    @classmethod
-    def api_key_hash_must_be_sha256(cls, value: SecretStr | None) -> SecretStr | None:
-        if value is not None and re.fullmatch(r"[0-9a-f]{64}", value.get_secret_value()) is None:
-            raise ValueError("auth_api_key_hash must be a lowercase SHA-256 hex digest")
-        return value
-
     def model_post_init(self, __context: object) -> None:
-        if self.auth_mode == "api_key" and self.auth_api_key_hash is None:
-            raise ValueError("auth_api_key_hash is required when auth_mode is api_key")
+        if self.auth_mode == "disabled":
+            if self.environment != "local":
+                raise ValueError("disabled auth requires explicit environment=local")
+            return
+        if self.auth_credentials is None or self.auth_pepper is None:
+            raise ValueError("auth_credentials and auth_pepper are required in api_key mode")
+        if len(self.auth_pepper.get_secret_value()) < 32:
+            raise ValueError("auth_pepper must contain at least 32 characters")
+        try:
+            credentials = TypeAdapter(tuple[CredentialRecord, ...]).validate_json(
+                self.auth_credentials.get_secret_value()
+            )
+        except ValueError:
+            raise ValueError("auth_credentials must be a valid credential registry") from None
+        if not credentials or not any(record.is_active() for record in credentials):
+            raise ValueError("auth_credentials must contain an active credential")
+        identities: dict[str, str] = {}
+        key_ids: set[str] = set()
+        for record in credentials:
+            if record.key_id in key_ids:
+                raise ValueError("Duplicate credential key_id")
+            key_ids.add(record.key_id)
+            if re.fullmatch(r"[0-9a-f]{64}", record.verifier.get_secret_value()) is None:
+                raise ValueError("Invalid credential verifier")
+            if identities.setdefault(record.principal_id, record.tenant_id) != record.tenant_id:
+                raise ValueError("A principal must be bound to exactly one tenant")
+        self._credentials = credentials
+
+    @property
+    def credentials(self) -> tuple[CredentialRecord, ...]:
+        return self._credentials
 
 
 @lru_cache

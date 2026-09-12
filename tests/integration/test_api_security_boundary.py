@@ -1,19 +1,43 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
+from test_run_submission_api import InMemoryRunService
 
 from agent_runtime.api.main import create_app
 from agent_runtime.application.runs import RunSnapshot
 from agent_runtime.domain.states import EvaluationStatus, ExecutionStatus
-from agent_runtime.infrastructure.redis.rate_limiter import RateLimitDecision
+from agent_runtime.infrastructure.redis.rate_limiter import (
+    NoopRateLimiter,
+    RateLimitDecision,
+    RateLimitUnavailable,
+)
 from agent_runtime.security.audit import SecurityAuditRecord
+from agent_runtime.security.credentials import issue_credential, registry_entry
 from agent_runtime.settings import Settings
+
+PEPPER = "integration-only-pepper-" * 2
+KEY, RECORD = issue_credential(principal_id="alice", tenant_id="tenant-a", pepper=PEPPER)
+KEY_B, RECORD_B = issue_credential(principal_id="bob", tenant_id="tenant-b", pepper=PEPPER)
+KEY_ROTATED, RECORD_ROTATED = issue_credential(
+    principal_id="alice", tenant_id="tenant-a", pepper=PEPPER
+)
+
+
+def secured_settings(**kwargs: Any) -> Settings:
+    return Settings(
+        auth_mode="api_key",
+        auth_pepper=PEPPER,
+        auth_credentials=json.dumps(
+            [registry_entry(r) for r in (RECORD, RECORD_B, RECORD_ROTATED)]
+        ),
+        **kwargs,
+    )
 
 
 class CountingRunService:
@@ -66,13 +90,9 @@ class SequenceRateLimiter:
         return None
 
 
-def _key_hash() -> str:
-    return hashlib.sha256(b"integration-test-api-key").hexdigest()
-
-
 def _headers(**extra: str) -> dict[str, str]:
     return {
-        "X-API-Key": "integration-test-api-key",
+        "X-API-Key": KEY,
         "X-Client-Id": "security-test-client",
         "Idempotency-Key": "security-test-run-0001",
         **extra,
@@ -84,7 +104,7 @@ def _client(
 ) -> TestClient:
     return TestClient(
         create_app(
-            Settings(auth_mode="api_key", auth_api_key_hash=_key_hash(), max_request_bytes=1024),
+            secured_settings(max_request_bytes=1024),
             run_service=service,
             rate_limiter=limiter,
             audit_sink=audit,
@@ -111,7 +131,8 @@ def test_missing_and_invalid_credentials_do_not_submit_a_run_or_leak_raw_key() -
     assert missing.status_code == 401
     assert invalid.status_code == 403
     assert service.submission_count == 0
-    assert audit.records[-1].credential_fingerprint == hashlib.sha256(b"wrong-secret").hexdigest()
+    assert audit.records[-1].credential_fingerprint is None
+    assert audit.records[-1].client_id is None
     assert "wrong-secret" not in json.dumps([record.__dict__ for record in audit.records])
 
 
@@ -123,7 +144,13 @@ def test_shared_limiter_blocks_before_run_submission() -> None:
         first = client.post("/v1/runs", headers=_headers(), json={"input": {"prompt": "x"}})
         second = client.post(
             "/v1/runs",
-            headers=_headers(**{"Idempotency-Key": "security-test-run-0002"}),
+            headers=_headers(
+                **{
+                    "Idempotency-Key": "security-test-run-0002",
+                    "X-Client-Id": "rotated-header",
+                    "X-API-Key": KEY_ROTATED,
+                }
+            ),
             json={"input": {"prompt": "x"}},
         )
 
@@ -132,6 +159,11 @@ def test_shared_limiter_blocks_before_run_submission() -> None:
     assert second.headers["retry-after"] == "3"
     assert service.submission_count == 1
     assert audit.records[-1].reason == "RATE_LIMIT_EXCEEDED"
+    assert limiter.client_ids == ["alice", "alice"]
+    assert audit.records[-1].client_id == "tenant-a"
+    serialized = json.dumps([record.__dict__ for record in audit.records])
+    assert KEY not in serialized
+    assert RECORD.verifier.get_secret_value() not in serialized
 
 
 def test_oversized_request_is_rejected_before_auth_or_provider_work() -> None:
@@ -149,3 +181,145 @@ def test_oversized_request_is_rejected_before_auth_or_provider_work() -> None:
     assert response.json()["error"]["code"] == "REQUEST_TOO_LARGE"
     assert service.submission_count == 0
     assert limiter.client_ids == []
+
+
+@pytest.mark.parametrize(
+    "value", ["x" * 129, "x" * 10000, "bad value", "", " leading", "trailing ", "a/b"]
+)
+def test_invalid_identity_returns_422_without_audit_or_persistence(value: str) -> None:
+    service, limiter, audit = CountingRunService(), SequenceRateLimiter([]), RecordingAuditSink()
+    with _client(service, limiter, audit) as client:
+        response = client.post(
+            "/v1/runs", headers=_headers(**{"X-Client-Id": value}), json={"input": {"prompt": "x"}}
+        )
+    assert response.status_code == 422
+    assert not audit.records
+    assert not limiter.client_ids
+    assert service.submission_count == 0
+
+
+def test_maximum_length_identity_is_valid_but_cannot_set_tenant() -> None:
+    service = InMemoryRunService()
+    with TestClient(
+        create_app(secured_settings(), run_service=service, rate_limiter=NoopRateLimiter())
+    ) as client:
+        response = client.post(
+            "/v1/runs",
+            headers=_headers(**{"X-Client-Id": "a" * 128}),
+            json={"input": {"prompt": "x"}},
+        )
+    assert response.status_code == 202
+    assert set(service._owners.values()) == {"tenant-a"}
+
+
+def test_duplicate_client_identity_is_rejected() -> None:
+    service, limiter, audit = CountingRunService(), SequenceRateLimiter([]), RecordingAuditSink()
+    with _client(service, limiter, audit) as client:
+        response = client.get(
+            "/v1/runs/" + str(uuid.uuid4()),
+            headers=[("X-API-Key", KEY), ("X-Client-Id", "first"), ("X-Client-Id", "second")],
+        )
+    assert response.status_code == 422
+    assert not audit.records
+    assert not limiter.client_ids
+
+
+def test_tenant_isolation_for_all_run_evaluation_and_replay_routes() -> None:
+    service = InMemoryRunService()
+    with TestClient(
+        create_app(secured_settings(), run_service=service, rate_limiter=NoopRateLimiter())
+    ) as client:
+        # No X-Client-Id is required in authenticated mode.
+        owner = {"X-API-Key": KEY, "Idempotency-Key": "isolation-run-0001"}
+        created = client.post("/v1/runs", headers=owner, json={"input": {"prompt": "private"}})
+        assert created.status_code == 202
+        run_id = created.json()["run_id"]
+        attacker = {
+            "X-API-Key": KEY_B,
+            "X-Client-Id": "tenant-a",
+            "Idempotency-Key": "isolation-replay-0001",
+        }
+        for suffix in ("", "/attempts", "/events", "/evaluations"):
+            assert client.get(f"/v1/runs/{run_id}{suffix}", headers=attacker).status_code == 404
+            assert client.get(f"/v1/runs/{run_id}{suffix}", headers=owner).status_code == 200
+        assert (
+            client.post(
+                f"/v1/runs/{run_id}/evaluations",
+                headers=attacker,
+                json={"rules": [{"type": "non_empty"}]},
+            ).status_code
+            == 404
+        )
+        assert client.post(f"/v1/runs/{run_id}/replay", headers=attacker).status_code == 404
+        assert (
+            client.post(
+                f"/v1/runs/{run_id}/replay",
+                headers={**owner, "Idempotency-Key": "owner-replay-0001"},
+            ).status_code
+            == 202
+        )
+        other = client.post(
+            "/v1/runs", headers={**owner, "X-API-Key": KEY_B}, json={"input": {"prompt": "private"}}
+        )
+        assert other.status_code == 202
+        assert other.json()["run_id"] != run_id
+        duplicate = client.post(
+            "/v1/runs",
+            headers={**owner, "X-API-Key": KEY_ROTATED, "X-Client-Id": "tenant-b"},
+            json={"input": {"prompt": "private"}},
+        )
+        assert duplicate.json()["run_id"] == run_id
+        assert duplicate.json()["replayed"]
+
+
+def test_public_allowlist_and_docs_cover_routes_outside_v1() -> None:
+    app = create_app(
+        secured_settings(), run_service=CountingRunService(), rate_limiter=NoopRateLimiter()
+    )
+
+    @app.get("/future-private-route")
+    async def future_route():
+        return {"ok": True}
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+        for path in (
+            "/healthz/private",
+            "/healthz/",
+            "/future-private-route",
+            "/docs",
+            "/redoc",
+            "/openapi.json",
+        ):
+            assert client.get(path).status_code == 401
+        assert client.post("/healthz").status_code == 401
+        assert client.get("/future-private-route", headers={"X-API-Key": KEY}).status_code == 200
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            assert client.get(path, headers={"X-API-Key": KEY}).status_code == 404
+
+
+def test_headerless_regression_route_is_rate_limited_and_redis_failure_is_closed() -> None:
+    service, audit = CountingRunService(), RecordingAuditSink()
+    limiter = SequenceRateLimiter([RateLimitDecision(False, 2)])
+    with _client(service, limiter, audit) as client:
+        response = client.post("/v1/evaluation-regressions", headers={"X-API-Key": KEY}, json={})
+    assert response.status_code == 429
+    assert limiter.client_ids == ["alice"]
+
+    class UnavailableLimiter:
+        async def check(self, client_id: str):
+            raise RateLimitUnavailable("offline")
+
+    with TestClient(
+        create_app(
+            secured_settings(),
+            run_service=service,
+            rate_limiter=UnavailableLimiter(),
+            audit_sink=audit,
+        )
+    ) as client:
+        assert (
+            client.post("/v1/runs", headers=_headers(), json={"input": {"prompt": "x"}}).status_code
+            == 503
+        )
+    assert service.submission_count == 0
