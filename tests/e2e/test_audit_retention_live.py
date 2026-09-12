@@ -138,6 +138,7 @@ async def test_purge_does_not_block_a_concurrent_audit_insert():
         cutoff = resolve_cutoff(settings)
         async with engine.begin() as purge:
             await purge.execute(text("SET LOCAL arr.allow_audit_purge = 'on'"))
+            purge_pid = (await purge.execute(text("SELECT pg_backend_pid()"))).scalar_one()
             await purge.execute(
                 text("DELETE FROM security_audit_events WHERE created_at < :c"),
                 {"c": cutoff},
@@ -147,10 +148,17 @@ async def test_purge_does_not_block_a_concurrent_audit_insert():
                 modes = set(
                     (
                         await connection.execute(
+                            # Scoped to the purge backend on purpose. Unscoped,
+                            # this also sees background work -- autovacuum on a
+                            # table this test fills and empties takes
+                            # ShareUpdateExclusiveLock, which is unrelated to
+                            # the purge and does not block INSERT.
                             text(
                                 "SELECT DISTINCT mode FROM pg_locks "
-                                "WHERE relation = 'security_audit_events'::regclass"
-                            )
+                                "WHERE relation = 'security_audit_events'::regclass "
+                                "AND pid = :pid"
+                            ),
+                            {"pid": purge_pid},
                         )
                     )
                     .scalars()
