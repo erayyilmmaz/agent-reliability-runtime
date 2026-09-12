@@ -69,6 +69,21 @@ class CountingRunService:
             False,
         )
 
+    async def get_run(
+        self, *, client_id: str, run_id: uuid.UUID, principal_id: str | None = None
+    ) -> RunSnapshot:
+        del client_id, principal_id
+        return RunSnapshot(
+            id=run_id,
+            execution_status=ExecutionStatus.QUEUED,
+            evaluation_status=EvaluationStatus.NOT_RUN,
+            created_at=datetime.now(UTC),
+            started_at=None,
+            completed_at=None,
+            replay_of_run_id=None,
+            error_code=None,
+        )
+
 
 class RecordingAuditSink:
     def __init__(self) -> None:
@@ -459,3 +474,75 @@ def test_headerless_regression_route_is_rate_limited_and_redis_failure_is_closed
             == 503
         )
     assert service.submission_count == 0
+
+
+# --- PERF-003: audit write amplification -----------------------------------
+
+
+def test_audited_reads_write_one_row_not_two() -> None:
+    """A SENSITIVE_READ record already carries everything AUTHENTICATION does.
+
+    Reads are the highest-volume path (wait_for_terminal polls), so the
+    redundant second row was pure write amplification: 20 GETs produced exactly
+    40 rows before this change.
+    """
+    service = CountingRunService()
+    limiter = SequenceRateLimiter([RateLimitDecision(True, 1)] * 10)
+    audit = RecordingAuditSink()
+    run_id = uuid.uuid4()
+
+    with _client(service, limiter, audit) as client:
+        response = client.get(f"/v1/runs/{run_id}", headers=_headers())
+
+    assert response.status_code in (200, 404)
+    assert [record.event_type for record in audit.records] == ["SENSITIVE_READ"]
+
+    # No information is lost: the surviving row carries the identity fields the
+    # AUTHENTICATION row used to carry, plus the target.
+    read = audit.records[0]
+    assert read.principal_id is not None
+    assert read.credential_fingerprint is not None
+    assert read.target_run_id == run_id
+    assert read.resource == "run"
+
+
+def test_writes_still_produce_an_authentication_row() -> None:
+    """Non-read paths have no second record, so theirs must not be skipped."""
+    service = CountingRunService()
+    limiter = SequenceRateLimiter([RateLimitDecision(True, 1)] * 10)
+    audit = RecordingAuditSink()
+
+    with _client(service, limiter, audit) as client:
+        response = client.post("/v1/runs", headers=_headers(), json={"input": {"prompt": "x"}})
+
+    assert response.status_code == 202
+    assert [record.event_type for record in audit.records] == ["AUTHENTICATION"]
+    assert audit.records[0].outcome == "ALLOWED"
+
+
+def test_unaudited_get_paths_still_produce_an_authentication_row() -> None:
+    """Only the paths that generate a read record may skip the auth record."""
+    service = CountingRunService()
+    limiter = SequenceRateLimiter([RateLimitDecision(True, 1)] * 10)
+    audit = RecordingAuditSink()
+
+    with _client(service, limiter, audit) as client:
+        client.get("/v1/runs/not-a-uuid", headers=_headers())
+
+    assert [record.event_type for record in audit.records] == ["AUTHENTICATION"]
+
+
+def test_denied_requests_are_still_audited() -> None:
+    """The skip must never apply to a rejection - denials are the forensic signal."""
+    service = CountingRunService()
+    limiter = SequenceRateLimiter([RateLimitDecision(True, 1)] * 10)
+    audit = RecordingAuditSink()
+
+    with _client(service, limiter, audit) as client:
+        denied = client.get(
+            f"/v1/runs/{uuid.uuid4()}", headers=_headers(**{"X-API-Key": "wrong-secret"})
+        )
+
+    assert denied.status_code == 403
+    assert audit.records[-1].event_type == "AUTHENTICATION"
+    assert audit.records[-1].outcome == "DENIED"

@@ -698,6 +698,59 @@ converts a read-scaling problem into a write-scaling one.
 **Effort:** Low (batching) / Medium (async buffer) | **Risk:** Medium — touches
 an audit guarantee | **Priority:** **P1**
 
+#### ✅ Resolved — by removing the redundant row, not by batching
+
+**The recommendation above was not implementable as written.** The two records
+sit on opposite sides of the handler and cannot share a transaction:
+
+- `AUTHENTICATION/ALLOWED` must commit **before** `call_next`, so a fail-closed
+  policy can reject with `503` without doing the work.
+- `SENSITIVE_READ` can only be written **after** `call_next`, because it records
+  the response status.
+
+Batching them would mean deferring the first past the handler, which destroys
+exactly the guarantee SEC-007 exists to provide.
+
+The field sets made a better fix available. `SENSITIVE_READ` carries every
+field `AUTHENTICATION` carries — `client_id`, `credential_fingerprint`,
+`principal_id`, `outcome`, `reason` — **plus** `target_run_id` and `resource`.
+On an audited read path the second row is therefore pure amplification, and
+reads are the highest-volume path because `wait_for_terminal` polls.
+
+The `AUTHENTICATION/ALLOWED` row is now skipped exactly when a `SENSITIVE_READ`
+row will be written. Writes and unaudited paths still get it — it is their only
+record — and **denials are never skipped**, since a rejection is the forensic
+signal that matters.
+
+No data is returned without an audit record: the read record is still written
+before the response is released, and a failure under `fail_closed` still
+replaces the payload with `503`.
+
+**Measured against a live database:** 20 authenticated `GET /v1/runs/{id}`
+produced **20** rows, down from exactly **40**:
+
+| | Rows per read | Row types after 20 GETs + 1 POST |
+| - | ---: | --- |
+| Before | 2.0 | 40 × (AUTHENTICATION + SENSITIVE_READ) |
+| After | **1.0** | 20 × SENSITIVE_READ, 1 × AUTHENTICATION (from the POST) |
+
+**Latency and throughput**, 5 VUs × 20 s × 3 repeats, back to back on one host:
+
+| | RPS (median) | p50 |
+| - | ---: | ---: |
+| Before | 531 | 8.88 ms |
+| After | **669** | **6.91 ms** |
+
+**+26% throughput, −22% p50.**
+
+> **Methodology note, recorded because it nearly produced a wrong conclusion.**
+> The first post-change measurement compared against a reference captured an
+> hour earlier and appeared to show a *regression* (202-258 RPS against 425).
+> Two variables had drifted: the rate-limit window differed between the runs,
+> and the host had been running builds in between. §22 requires the same
+> environment and the same configuration, and "the same laptop an hour ago" is
+> neither. Only the back-to-back A/B above is a valid comparison.
+
 ---
 
 ### PERF-004 — Provider-call quota is enforced at execution, not at admission

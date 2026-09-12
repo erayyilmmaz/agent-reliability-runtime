@@ -157,6 +157,26 @@ def _validate_regression_targets(settings: Settings, *targets: ProviderModelTarg
             raise ValueError("openai target requires APP_OPENAI_API_KEY")
 
 
+SENSITIVE_READ_PATH = re.compile(
+    r"/v1/(runs|jobs)/([0-9a-fA-F-]{36})(?:/(attempts|events|evaluations))?"
+)
+
+
+def _sensitive_read_target(request: Request) -> tuple[UUID, str] | None:
+    """Return (target, resource) when this request will produce a read audit row."""
+
+    if request.method != "GET":
+        return None
+    match = SENSITIVE_READ_PATH.fullmatch(request.url.path)
+    if match is None:
+        return None
+    try:
+        target = UUID(match[2])
+    except ValueError:
+        return None
+    return target, match[3] or ("job" if match[1] == "jobs" else "run")
+
+
 def create_app(
     settings: Settings | None = None,
     run_service: RunSubmissionService | None = None,
@@ -353,7 +373,20 @@ def create_app(
                     headers={"Retry-After": str(decision.retry_after_seconds)},
                 )
 
-        if runtime_settings.auth_mode == "api_key":
+        read_target = _sensitive_read_target(request)
+
+        # PERF-003: a SENSITIVE_READ record carries every field an
+        # AUTHENTICATION/ALLOWED record carries, plus the target and resource.
+        # On an audited read path the second row is therefore pure write
+        # amplification -- and reads are the highest-volume path, because
+        # wait_for_terminal polls. Writes and unaudited paths still get the
+        # AUTHENTICATION row, which is their only record.
+        #
+        # The two cannot simply share a transaction: this one must commit
+        # before the handler runs so a fail-closed policy can reject without
+        # doing the work, while the read record needs the response status.
+        # Skipping the redundant row is the change that holds that ordering.
+        if runtime_settings.auth_mode == "api_key" and read_target is None:
             audited = await write_security_audit(
                 event_type="AUTHENTICATION",
                 outcome="ALLOWED",
@@ -366,17 +399,9 @@ def create_app(
                 return _security_error(503, "AUDIT_UNAVAILABLE", "Security audit is unavailable.")
 
         async def audit_read(status_code: int) -> bool:
-            match = re.fullmatch(
-                r"/v1/(runs|jobs)/([0-9a-fA-F-]{36})(?:/(attempts|events|evaluations))?",
-                request.url.path,
-            )
-            if request.method != "GET" or not match:
+            if read_target is None:
                 return True
-            try:
-                target = UUID(match[2])
-            except ValueError:
-                return True
-            resource = match[3] or ("job" if match[1] == "jobs" else "run")
+            target, resource = read_target
             outcome = (
                 "ALLOWED" if status_code < 400 else ("ERROR" if status_code >= 500 else "DENIED")
             )
