@@ -40,6 +40,11 @@ from agent_runtime.settings import Settings, get_settings
 
 PURGE_GUC = "arr.allow_audit_purge"
 
+# set_config(name, value, is_local=true) is SET LOCAL with every argument bound,
+# so the GUC name never reaches the statement as text. SET LOCAL itself cannot
+# take bind parameters.
+_OPEN_GATE = text("SELECT set_config(:guc, 'on', true)")
+
 _COUNT = text("SELECT count(*) FROM security_audit_events WHERE created_at < :cutoff")
 # The CTE bounds the statement: ctid is the cheapest join back to the heap, and
 # the ORDER BY keeps the scan on ix_security_audit_events_created_at.
@@ -118,7 +123,7 @@ async def purge_batch(session: AsyncSession, *, cutoff: datetime, batch_size: in
     back never leaves the table deletable.
     """
 
-    await session.execute(text(f"SET LOCAL {PURGE_GUC} = 'on'"))
+    await session.execute(_OPEN_GATE, {"guc": PURGE_GUC})
     result = cast(
         "CursorResult[Any]",
         await session.execute(_DELETE_BATCH, {"cutoff": cutoff, "batch_size": batch_size}),
