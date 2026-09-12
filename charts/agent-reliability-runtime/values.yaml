@@ -1,7 +1,14 @@
 image:
   repository: agent-reliability-runtime
+  # SEC-016: set `digest` to deploy an immutable image. When it is set, `tag`
+  # is ignored. Prefer it in staging and production; the release workflow
+  # prints the digest it published.
+  #   digest: sha256:...
+  digest: ""
   tag: ""
-  pullPolicy: IfNotPresent
+  # A mutable tag must be re-pulled; a digest never changes, so IfNotPresent is
+  # correct there. Always is the safe default while tags are in use.
+  pullPolicy: Always
 
 imagePullSecrets: []
 nameOverride: ""

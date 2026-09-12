@@ -30,7 +30,7 @@ spec:
       {{- end }}
       containers:
         - name: {{ .component }}
-          image: "{{ $root.Values.image.repository }}:{{ default $root.Chart.AppVersion $root.Values.image.tag }}"
+          image: {{ include "agent-reliability-runtime.image" $root | quote }}
           imagePullPolicy: {{ $root.Values.image.pullPolicy }}
           securityContext:
             {{- toYaml $root.Values.securityContext | nindent 12 }}

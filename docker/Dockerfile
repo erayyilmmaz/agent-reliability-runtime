@@ -1,4 +1,7 @@
-FROM python:3.12-slim
+# SEC-016: pinned by multi-arch index digest so two builds of the same commit
+# resolve identical base layers. Update the digest and the comment together.
+#   docker buildx imagetools inspect python:3.12-slim --format '{{.Manifest.Digest}}'
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -12,7 +15,7 @@ RUN groupadd --system --gid 10001 runtime \
     && useradd --system --uid 10001 --gid runtime --home-dir /app \
        --shell /usr/sbin/nologin runtime
 
-COPY --from=ghcr.io/astral-sh/uv:0.6.3 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.6.3@sha256:8257f3d17fd04794feaf89d83b4ccca3b2eaa5501de9399fa53929843c0a5b55 /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
@@ -26,3 +29,10 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 RUN chown -R runtime:runtime /app
 USER runtime
+
+# SEC-016: all four entrypoints (api, worker, dispatcher, scheduler) publish a
+# heartbeat, so one image-level check is correct for every role. Kubernetes
+# overrides this with the chart's own probes; this covers plain `docker run`.
+# Skipped when APP_HEARTBEAT_PATH is unset rather than passing vacuously.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["sh", "-c", "test -z \"$APP_HEARTBEAT_PATH\" || agent-runtime-healthcheck --max-age 60"]

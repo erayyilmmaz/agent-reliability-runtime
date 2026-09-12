@@ -52,6 +52,7 @@ Compose smoke demo, critical failure matrix, and contributor delivery material.
 - [Policy-aware provider routing](docs/architecture/routing-policy.md)
 - [Evaluation regression suite](docs/architecture/evaluation-regression-suite.md)
 - [Least privilege: secrets, Kubernetes, database](docs/security/least-privilege.md)
+- [Supply chain and delivery integrity](docs/security/supply-chain.md)
 - [10–15 minute recruiter demo](docs/recruiter-demo.md)
 - [Critical failure matrix](docs/testing/failure-matrix.md)
 
@@ -326,7 +327,11 @@ binding remain a separate rollout gate, as agreed for this step.
 
 The GitHub Actions workflow runs locked dependency installation, Ruff, mypy,
 pytest with coverage, and an isolated Docker Compose smoke demo on pushes and
-pull requests. See the [critical failure matrix](docs/testing/failure-matrix.md)
+pull requests. A parallel `security` job gates merges on dependency auditing
+(`pip-audit`), secret scanning (`gitleaks`), static analysis (`semgrep`) and
+container scanning (`trivy`), and publishes a CycloneDX SBOM. Every third-party
+Action is pinned to a commit SHA and the base images are pinned by digest; see
+[supply chain](docs/security/supply-chain.md). See the [critical failure matrix](docs/testing/failure-matrix.md)
 for the exact scenario-to-evidence mapping.
 
 ## License

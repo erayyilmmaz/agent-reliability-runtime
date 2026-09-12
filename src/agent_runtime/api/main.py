@@ -56,6 +56,7 @@ from agent_runtime.infrastructure.redis.rate_limiter import (
     RedisFixedWindowRateLimiter,
 )
 from agent_runtime.observability.exceptions import record_safe_exception
+from agent_runtime.observability.heartbeat import Heartbeat
 from agent_runtime.observability.metrics import get_runtime_metrics
 from agent_runtime.observability.telemetry import (
     extract_trace_context,
@@ -192,13 +193,31 @@ def create_app(
             else NoopRateLimiter()
         )
 
+    async def _emit_heartbeat(heartbeat: Heartbeat) -> None:
+        """Prove the event loop is still scheduling work (SEC-OPS-01).
+
+        A blocked loop stops writing this, which is exactly the failure mode a
+        long-running evaluation rule would cause.
+        """
+
+        while True:
+            heartbeat.beat()
+            await asyncio.sleep(runtime_settings.heartbeat_interval_seconds)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        if owns_rate_limiter:
-            await rate_limiter.close()
-        if engine is not None:
-            await engine.dispose()
+        heartbeat = Heartbeat(runtime_settings.heartbeat_path, component="api")
+        pulse = asyncio.create_task(_emit_heartbeat(heartbeat)) if heartbeat.enabled else None
+        try:
+            yield
+        finally:
+            if pulse is not None:
+                pulse.cancel()
+                await asyncio.gather(pulse, return_exceptions=True)
+            if owns_rate_limiter:
+                await rate_limiter.close()
+            if engine is not None:
+                await engine.dispose()
 
     local_docs = runtime_settings.auth_mode == "disabled"
     app = FastAPI(

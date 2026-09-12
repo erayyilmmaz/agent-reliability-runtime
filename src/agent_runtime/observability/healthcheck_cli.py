@@ -7,17 +7,22 @@ worker and scheduler, which serve no HTTP traffic.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from agent_runtime.observability.heartbeat import read_heartbeat
-from agent_runtime.settings import get_settings
 
 
 def main() -> None:
+    # Deliberately reads the environment directly instead of building Settings.
+    # A liveness probe must not fail because some unrelated part of the
+    # configuration is invalid -- that would report the process as dead when it
+    # is running fine, and would restart it into the same broken config.
     args = _parser().parse_args()
-    path = Path(args.path) if args.path is not None else get_settings().heartbeat_path
-    if path is None:
-        raise SystemExit("heartbeat path is not configured")
+    configured = args.path or os.environ.get("APP_HEARTBEAT_PATH")
+    if not configured:
+        raise SystemExit("heartbeat path is not configured; set APP_HEARTBEAT_PATH or --path")
+    path = Path(configured)
 
     status = read_heartbeat(path)
     if status is None:

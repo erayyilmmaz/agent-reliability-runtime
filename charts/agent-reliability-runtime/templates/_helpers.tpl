@@ -38,3 +38,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{- /*
+SEC-016: deploy by digest when one is supplied. A tag is mutable, so a
+compromised registry tag can be rolled out without any chart change.
+*/ -}}
+{{- define "agent-reliability-runtime.image" -}}
+{{- if .Values.image.digest -}}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
+{{- else -}}
+{{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) }}
+{{- end -}}
+{{- end }}
