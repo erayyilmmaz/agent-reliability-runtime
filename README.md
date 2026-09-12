@@ -329,6 +329,33 @@ The tenant envelope-encryption/retention adapter is a tested **prototype**, not
 automatic encryption of existing run data; production KMS and runtime read/write
 binding remain a separate rollout gate, as agreed for this step.
 
+## Performance and capacity
+
+A measurement-driven audit and its remediations are recorded in
+[performance audit](docs/performance-audit.md), with the reproducible k6
+scenarios in [`performance-tests/`](performance-tests/README.md).
+
+One API pod runs one uvicorn process on one asyncio event loop, so it saturates
+at a single core: **~650-700 RPS sustained**, peaking near 880 at low
+concurrency, with latency growing linearly past saturation and no retrograde
+collapse. Giving a pod more CPU does nothing — capacity comes from replicas, and
+the chart ships an API `HorizontalPodAutoscaler` disabled by default. Note that
+the default rate limit is 60 requests per 60 s **per principal**, so a single
+caller reaches well under 1% of one pod until that is raised.
+
+Latency does not gate pull requests: the numbers above come from a 10-core
+workstation and would be noise on a shared CI runner. What gates instead is
+structural and hardware-independent — one audit row per authenticated read,
+query count independent of result size, no durable work for a rejected
+submission, alert thresholds inside their histogram's bucket range, the cluster
+connection ceiling fitting `max_connections`, and pool overflow staying
+disabled. Each was verified to fail when its remediation is reverted.
+
+`agent-runtime-audit-purge` ages rows out of `security_audit_events`, which
+otherwise grows with read traffic without bound. It is operator tooling: off
+unless `APP_AUDIT_RETENTION_DAYS` is set, dry-run by default, and it needs the
+DDL credential.
+
 ## Delivery checks
 
 The GitHub Actions workflow runs locked dependency installation, Ruff, mypy,
