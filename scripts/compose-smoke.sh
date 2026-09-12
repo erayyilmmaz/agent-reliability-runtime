@@ -6,6 +6,11 @@ arr_api_url="http://localhost:8000/v1/runs"
 arr_regression_url="http://localhost:8000/v1/evaluation-regressions"
 arr_run_key="compose-smoke-$(date +%s)"
 
+# SEC-021B: Grafana refuses to start without an admin password. The smoke demo
+# stays credentials-free by generating a throwaway one for this run only; the
+# stack is torn down by the trap below.
+export GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 24)}"
+
 cleanup() {
   docker compose down --remove-orphans
 }

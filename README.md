@@ -53,6 +53,7 @@ Compose smoke demo, critical failure matrix, and contributor delivery material.
 - [Evaluation regression suite](docs/architecture/evaluation-regression-suite.md)
 - [Least privilege: secrets, Kubernetes, database](docs/security/least-privilege.md)
 - [Supply chain and delivery integrity](docs/security/supply-chain.md)
+- [Local development surface](docs/security/local-development.md)
 - [10–15 minute recruiter demo](docs/recruiter-demo.md)
 - [Critical failure matrix](docs/testing/failure-matrix.md)
 
@@ -71,8 +72,13 @@ Prerequisites: Docker Desktop, Python 3.12+, and [uv](https://docs.astral.sh/uv/
 
 ```bash
 cp .env.example .env
+make grafana-password   # Grafana will not start without an admin password
 make dev
 ```
+
+Every Compose port binds to `127.0.0.1`, so the stack is not reachable from the
+network the machine is on; set `ARR_BIND_HOST=0.0.0.0` to opt into LAN access.
+See [local development surface](docs/security/local-development.md).
 
 The Compose stack starts PostgreSQL, Redis, and RabbitMQ; runs Alembic
 migrations to completion; then starts the API on `http://localhost:8000`,

@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help dev infra test lint typecheck format-check coverage migrate smoke recruiter-demo helm-lint terraform-fmt terraform-validate down
+.PHONY: help dev infra test lint typecheck format-check coverage migrate smoke recruiter-demo helm-lint terraform-fmt terraform-validate grafana-password down
 
 help:
 	@echo "make dev          Build and start the local runtime and infrastructure"
@@ -15,6 +15,7 @@ help:
 	@echo "make helm-lint    Lint and render the Helm chart"
 	@echo "make terraform-fmt Check Terraform formatting"
 	@echo "make terraform-validate Initialize without state and validate every Terraform environment"
+	@echo "make grafana-password  Append a generated Grafana admin password to .env"
 	@echo "make down         Stop and remove local containers"
 
 dev:
@@ -59,6 +60,12 @@ terraform-validate:
 	terraform -chdir=infra/terraform/environments/staging validate
 	terraform -chdir=infra/terraform/environments/production init -backend=false -input=false
 	terraform -chdir=infra/terraform/environments/production validate
+
+grafana-password:
+	@grep -q '^GRAFANA_ADMIN_PASSWORD=.\+' .env 2>/dev/null \
+		&& echo 'GRAFANA_ADMIN_PASSWORD already set in .env' \
+		|| { echo "GRAFANA_ADMIN_PASSWORD=$$(openssl rand -base64 24)" >> .env; \
+		     echo 'Generated GRAFANA_ADMIN_PASSWORD in .env'; }
 
 down:
 	docker compose down --remove-orphans
