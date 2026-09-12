@@ -145,10 +145,17 @@ jobs:
       # correctness thresholds only (all checks pass, zero failed requests),
       # which is meaningful on any runner.
       - uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1.2.1
+      # setup-env.sh generates the throwaway credential through the project's
+      # own CLI, so this job needs the package installed - it is otherwise a
+      # Docker-only job.
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
       - name: Performance suite smoke
         env:
           GRAFANA_ADMIN_PASSWORD: ci-ephemeral-${{ github.run_id }}
         run: |
+          uv sync --locked --dev
           bash performance-tests/scripts/setup-env.sh
           set -a; . performance-tests/.env.perf; set +a
           docker compose -f docker-compose.yml \
