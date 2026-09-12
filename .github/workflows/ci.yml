@@ -73,6 +73,8 @@ jobs:
           version: v3.18.4
       - run: helm lint charts/agent-reliability-runtime
       - run: helm template arr charts/agent-reliability-runtime --namespace arr
+      # SEC-011 / SEC-012 / SEC-OPS-01 regression gate
+      - run: bash scripts/helm-security-check.sh
 
   terraform-validate:
     needs: quality

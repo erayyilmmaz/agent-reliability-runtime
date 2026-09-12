@@ -26,6 +26,8 @@ x-runtime: &runtime
     APP_LEASE_RECOVERY_POLL_INTERVAL_SECONDS: 5
     APP_OTEL_ENABLED: true
     APP_OTEL_ENDPOINT: http://otel-collector:4318
+    APP_HEARTBEAT_PATH: /tmp/arr/heartbeat.json
+    APP_HEARTBEAT_INTERVAL_SECONDS: 10
     APP_LOG_LEVEL: INFO
   depends_on:
     postgres:

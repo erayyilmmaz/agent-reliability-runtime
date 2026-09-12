@@ -1,0 +1,26 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- /*
+SEC-OPS-01: only multi-replica workloads get a budget. A minAvailable of 1 on a
+single-replica Deployment makes the pod permanently un-evictable and blocks
+every node drain, which trades a real availability problem for a worse one.
+*/ -}}
+{{- range $component := list "api" "worker" }}
+{{- $replicas := (index $.Values $component).replicaCount | int }}
+{{- if gt $replicas 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "agent-reliability-runtime.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "agent-reliability-runtime.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "agent-reliability-runtime.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+{{- end }}
+{{- end }}
+{{- end }}

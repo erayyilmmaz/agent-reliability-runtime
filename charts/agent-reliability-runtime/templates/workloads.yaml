@@ -20,6 +20,10 @@ spec:
         app.kubernetes.io/component: {{ .component }}
     spec:
       serviceAccountName: {{ include "agent-reliability-runtime.serviceAccountName" $root }}
+      # SEC-011: no process calls the Kubernetes API, so no pod needs a token.
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
       {{- with $root.Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -28,15 +32,29 @@ spec:
         - name: {{ .component }}
           image: "{{ $root.Values.image.repository }}:{{ default $root.Chart.AppVersion $root.Values.image.tag }}"
           imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $root.Values.securityContext | nindent 12 }}
           command:
             {{- toYaml .command | nindent 12 }}
+          env:
+            - name: APP_HEARTBEAT_PATH
+              value: {{ $root.Values.heartbeat.path | quote }}
           envFrom:
             - configMapRef:
                 name: {{ include "agent-reliability-runtime.fullname" $root }}-config
             - secretRef:
-                name: {{ required "existingSecret.name is required" $root.Values.existingSecret.name }}
+                name: {{ include "agent-reliability-runtime.commonSecretName" $root }}
+            {{- if .provider }}
+            # SEC-012: the provider key reaches the worker and nothing else.
+            - secretRef:
+                name: {{ required "existingSecret.provider is required for the worker" $root.Values.existingSecret.provider }}
+            {{- end }}
           resources:
             {{- toYaml .resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem is on, so every writable path is explicit.
+            - name: runtime-tmp
+              mountPath: /tmp
           {{- if .api }}
           ports:
             - name: http
@@ -55,22 +73,35 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 20
           {{- else }}
+          # SEC-OPS-01: asserts the loop is still making progress. Checking that
+          # PID 1 exists cannot distinguish a working process from a deadlocked
+          # one, or a worker whose broker connection has silently dropped.
           readinessProbe:
             exec:
-              command: ["sh", "-c", "kill -0 1"]
-            initialDelaySeconds: 5
+              command:
+                - agent-runtime-healthcheck
+                - --max-age
+                - {{ $root.Values.heartbeat.maxAgeSeconds | quote }}
+            initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             exec:
-              command: ["sh", "-c", "kill -0 1"]
-            initialDelaySeconds: 15
+              command:
+                - agent-runtime-healthcheck
+                - --max-age
+                - {{ $root.Values.heartbeat.maxAgeSeconds | quote }}
+            initialDelaySeconds: 30
             periodSeconds: 20
+            failureThreshold: 3
           {{- end }}
+      volumes:
+        - name: runtime-tmp
+          emptyDir: {}
 {{ end }}
-{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "api" "command" (list "agent-runtime-api") "replicaCount" .Values.api.replicaCount "resources" .Values.api.resources "api" true) }}
+{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "api" "command" (list "agent-runtime-api") "replicaCount" .Values.api.replicaCount "resources" .Values.api.resources "api" true "provider" false) }}
 ---
-{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "worker" "command" (list "agent-runtime-worker") "replicaCount" .Values.worker.replicaCount "resources" .Values.worker.resources "api" false) }}
+{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "worker" "command" (list "agent-runtime-worker") "replicaCount" .Values.worker.replicaCount "resources" .Values.worker.resources "api" false "provider" true) }}
 ---
-{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "dispatcher" "command" (list "agent-runtime-dispatcher") "replicaCount" .Values.dispatcher.replicaCount "resources" .Values.dispatcher.resources "api" false) }}
+{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "dispatcher" "command" (list "agent-runtime-dispatcher") "replicaCount" .Values.dispatcher.replicaCount "resources" .Values.dispatcher.resources "api" false "provider" false) }}
 ---
-{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "scheduler" "command" (list "agent-runtime-recovery") "replicaCount" .Values.scheduler.replicaCount "resources" .Values.scheduler.resources "api" false) }}
+{{ include "agent-reliability-runtime.workload" (dict "root" . "component" "scheduler" "command" (list "agent-runtime-recovery") "replicaCount" .Values.scheduler.replicaCount "resources" .Values.scheduler.resources "api" false "provider" false) }}

@@ -16,6 +16,7 @@ from agent_runtime.infrastructure.database.session import (
 from agent_runtime.infrastructure.messaging.dispatcher import OutboxDispatcher
 from agent_runtime.infrastructure.messaging.publisher import RabbitMqPublisher
 from agent_runtime.infrastructure.messaging.worker import RabbitMqWorker
+from agent_runtime.observability.heartbeat import Heartbeat
 from agent_runtime.observability.logging import configure_structured_logging
 from agent_runtime.observability.telemetry import TelemetryRuntime, configure_telemetry
 from agent_runtime.providers.deterministic import DeterministicProvider
@@ -62,10 +63,12 @@ async def _run_dispatcher(settings: Settings) -> None:
         publisher=publisher,
         batch_size=settings.outbox_batch_size,
     )
+    heartbeat = Heartbeat(settings.heartbeat_path, component="dispatcher")
     logger = logging.getLogger(__name__)
     try:
         while True:
             published_count = await dispatcher.dispatch_once()
+            heartbeat.beat()
             if published_count:
                 logger.info("outbox_dispatch_complete published_count=%s", published_count)
                 continue
@@ -112,11 +115,33 @@ async def _run_worker(settings: Settings) -> None:
             settings,
         ),
     )
+    heartbeat = Heartbeat(settings.heartbeat_path, component="worker")
+    monitor = asyncio.create_task(_beat_while_connected(worker, heartbeat, settings))
     try:
         await worker.run()
     finally:
+        monitor.cancel()
+        await asyncio.gather(monitor, return_exceptions=True)
         await worker.close()
         await engine.dispose()
+
+
+async def _beat_while_connected(
+    worker: RabbitMqWorker, heartbeat: Heartbeat, settings: Settings
+) -> None:
+    """Heartbeat the worker only while its broker connection is actually usable.
+
+    The worker is event-driven, so loop progress is not a liveness signal. A
+    dropped broker connection is: it means no delivery can arrive, even though
+    the process is alive.
+    """
+
+    if not heartbeat.enabled:
+        return
+    while True:
+        if worker.is_connected:
+            heartbeat.beat()
+        await asyncio.sleep(settings.heartbeat_interval_seconds)
 
 
 def run_worker() -> None:
@@ -133,11 +158,13 @@ async def _run_recovery(settings: Settings) -> None:
     recovery = ExecutionPersistenceService(
         create_session_factory(engine), lease_seconds=settings.execution_lease_seconds
     )
+    heartbeat = Heartbeat(settings.heartbeat_path, component="scheduler")
     logger = logging.getLogger(__name__)
     try:
         while True:
             recovered_count = await recovery.recover_expired_leases()
             queued_count = await recovery.schedule_due_retries()
+            heartbeat.beat()
             if recovered_count:
                 logger.info("execution_lease_recovery_complete recovered_count=%s", recovered_count)
             if queued_count:

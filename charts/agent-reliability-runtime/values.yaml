@@ -12,10 +12,47 @@ serviceAccount:
   name: ""
   annotations: {}
 
-# This chart never creates credential values. Create this Secret outside Helm
+# This chart never creates credential values. Create these Secrets outside Helm
 # (for example through External Secrets or kubectl) before installation.
+#
+# SEC-012: credentials are split by role so a single compromised pod does not
+# expose every credential the system holds.
+#   common    - APP_DATABASE_URL, APP_REDIS_URL, APP_RABBITMQ_URL,
+#               APP_AUTH_CREDENTIALS, APP_AUTH_PEPPER, APP_PAYLOAD_KEK
+#   provider  - APP_OPENAI_API_KEY. Mounted into the worker ONLY.
+#   migration - APP_MIGRATION_DATABASE_URL (DDL role, SEC-018). Mounted into the
+#               migration Job only. Falls back to `common` when empty.
 existingSecret:
-  name: agent-reliability-runtime-secrets
+  common: agent-reliability-runtime-secrets
+  provider: agent-reliability-runtime-provider
+  migration: ""
+
+# SEC-011: applied to every pod this chart renders. runAsUser matches the UID
+# pinned in docker/Dockerfile.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# SEC-OPS-01: background workloads have no HTTP surface, so their probes read a
+# heartbeat that is only written after real progress.
+heartbeat:
+  path: /tmp/arr/heartbeat.json
+  maxAgeSeconds: 60
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
 
 config:
   environment: production
@@ -53,6 +90,10 @@ config:
   leaseRecoveryPollIntervalSeconds: 5
   otelEnabled: false
   otelEndpoint: http://otel-collector:4318
+  # SEC-TRAN-01: staging/production reject redis:// and amqp:// unless this
+  # is deliberately turned on (for example an in-cluster kind demo).
+  allowPlaintextTransport: false
+  heartbeatIntervalSeconds: 10
   logLevel: INFO
 
 api:

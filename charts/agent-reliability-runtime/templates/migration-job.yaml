@@ -19,6 +19,10 @@ spec:
         app.kubernetes.io/component: migration
     spec:
       restartPolicy: Never
+      serviceAccountName: {{ include "agent-reliability-runtime.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -27,7 +31,18 @@ spec:
         - name: migrate
           image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
           command: ["alembic", "upgrade", "head"]
           envFrom:
+            # SEC-018: when existingSecret.migration is set it carries
+            # APP_MIGRATION_DATABASE_URL, the DDL-capable role that the
+            # long-running workloads never receive.
             - secretRef:
-                name: {{ required "existingSecret.name is required" .Values.existingSecret.name }}
+                name: {{ include "agent-reliability-runtime.migrationSecretName" . }}
+          volumeMounts:
+            - name: runtime-tmp
+              mountPath: /tmp
+      volumes:
+        - name: runtime-tmp
+          emptyDir: {}

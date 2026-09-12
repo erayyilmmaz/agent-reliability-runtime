@@ -44,6 +44,7 @@ agent-runtime-worker = "agent_runtime.processes:run_worker"
 agent-runtime-recovery = "agent_runtime.processes:run_recovery"
 agent-runtime-credential = "agent_runtime.security.cli:main"
 agent-runtime-regression = "agent_runtime.evaluation.cli:main"
+agent-runtime-healthcheck = "agent_runtime.observability.healthcheck_cli:main"
 agent-runtime-retention = "agent_runtime.security.retention_cli:main"
 
 [tool.hatch.build.targets.wheel]

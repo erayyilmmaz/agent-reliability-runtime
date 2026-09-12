@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import AnyUrl, Field, PrivateAttr, SecretStr, TypeAdapter, field_validator
@@ -20,8 +21,10 @@ class Settings(BaseSettings):
     database_url: AnyUrl = AnyUrl(
         "postgresql+asyncpg://runtime:runtime@localhost:5432/agent_runtime"
     )
+    migration_database_url: AnyUrl | None = None
     redis_url: AnyUrl = AnyUrl("redis://localhost:6379/0")
     rabbitmq_url: AnyUrl = AnyUrl("amqp://runtime:runtime@localhost:5672/")
+    allow_plaintext_transport: bool = False
     openai_api_key: SecretStr | None = None
     openai_base_url: AnyUrl = AnyUrl("https://api.openai.com/v1")
     openai_default_model: str = Field(default="gpt-5", min_length=1, max_length=128)
@@ -63,12 +66,14 @@ class Settings(BaseSettings):
     lease_recovery_poll_interval_seconds: float = Field(default=5.0, gt=0, le=300)
     otel_enabled: bool = True
     otel_endpoint: AnyUrl = AnyUrl("http://localhost:4318")
+    heartbeat_path: Path | None = None
+    heartbeat_interval_seconds: float = Field(default=10.0, gt=0, le=300)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
-    @field_validator("database_url")
+    @field_validator("database_url", "migration_database_url")
     @classmethod
-    def database_must_be_postgres(cls, value: AnyUrl) -> AnyUrl:
-        if value.scheme not in {"postgresql", "postgresql+asyncpg"}:
+    def database_must_be_postgres(cls, value: AnyUrl | None) -> AnyUrl | None:
+        if value is not None and value.scheme not in {"postgresql", "postgresql+asyncpg"}:
             raise ValueError("database_url must use postgresql or postgresql+asyncpg")
         return value
 
@@ -116,10 +121,44 @@ class Settings(BaseSettings):
             if identities.setdefault(record.principal_id, record.tenant_id) != record.tenant_id:
                 raise ValueError("A principal must be bound to exactly one tenant")
         self._credentials = credentials
+        # Checked last: a missing credential registry is the more fundamental
+        # misconfiguration and should be the error an operator sees first.
+        self._enforce_transport_encryption()
+
+    def _enforce_transport_encryption(self) -> None:
+        """Require TLS for internal links outside development (SEC-TRAN-01).
+
+        `allow_plaintext_transport` exists so that an in-cluster kind/k3d demo
+        stays possible, but it must be set deliberately: a plaintext broker or
+        cache link in a deployed environment is then a recorded decision rather
+        than an unnoticed default.
+        """
+
+        if self.environment not in {"staging", "production"} or self.allow_plaintext_transport:
+            return
+        insecure = [
+            name
+            for name, url, secure_scheme in (
+                ("redis_url", self.redis_url, "rediss"),
+                ("rabbitmq_url", self.rabbitmq_url, "amqps"),
+            )
+            if url.scheme != secure_scheme
+        ]
+        if insecure:
+            raise ValueError(
+                f"{self.environment} requires TLS for {', '.join(insecure)}; "
+                "use rediss:// and amqps://, or set allow_plaintext_transport"
+            )
 
     @property
     def credentials(self) -> tuple[CredentialRecord, ...]:
         return self._credentials
+
+    @property
+    def effective_migration_database_url(self) -> AnyUrl:
+        """The DDL credential, falling back to the runtime credential (SEC-018)."""
+
+        return self.migration_database_url or self.database_url
 
 
 @lru_cache

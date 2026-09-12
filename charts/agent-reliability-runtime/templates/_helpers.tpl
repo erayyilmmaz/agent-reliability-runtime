@@ -23,6 +23,14 @@ app.kubernetes.io/name: {{ include "agent-reliability-runtime.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
+{{- define "agent-reliability-runtime.commonSecretName" -}}
+{{- required "existingSecret.common is required" .Values.existingSecret.common }}
+{{- end }}
+
+{{- define "agent-reliability-runtime.migrationSecretName" -}}
+{{- default (include "agent-reliability-runtime.commonSecretName" .) .Values.existingSecret.migration }}
+{{- end }}
+
 {{- define "agent-reliability-runtime.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
 {{- default (include "agent-reliability-runtime.fullname" .) .Values.serviceAccount.name }}

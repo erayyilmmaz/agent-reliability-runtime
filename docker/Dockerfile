@@ -6,8 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN groupadd --system runtime \
-    && useradd --system --gid runtime --home-dir /app --shell /usr/sbin/nologin runtime
+# The UID is pinned so the Helm chart can assert runAsUser/runAsNonRoot against
+# a known identity instead of trusting whatever the base image allocates.
+RUN groupadd --system --gid 10001 runtime \
+    && useradd --system --uid 10001 --gid runtime --home-dir /app \
+       --shell /usr/sbin/nologin runtime
 
 COPY --from=ghcr.io/astral-sh/uv:0.6.3 /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./

@@ -88,6 +88,12 @@ class RabbitMqWorker:
         await legacy_queue.consume(self._handle_delivery, no_ack=False)
         await asyncio.Future()
 
+    @property
+    def is_connected(self) -> bool:
+        """True while the broker connection is usable (SEC-OPS-01 probe input)."""
+
+        return self._connection is not None and not self._connection.is_closed
+
     async def close(self) -> None:
         if self._connection is not None:
             await self._connection.close()

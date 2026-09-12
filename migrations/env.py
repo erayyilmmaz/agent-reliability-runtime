@@ -16,7 +16,10 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    return str(get_settings().database_url).replace("postgresql+asyncpg", "postgresql+psycopg")
+    """Use the dedicated DDL credential when one is configured (SEC-018)."""
+
+    url = get_settings().effective_migration_database_url
+    return str(url).replace("postgresql+asyncpg", "postgresql+psycopg")
 
 
 def run_migrations_offline() -> None:

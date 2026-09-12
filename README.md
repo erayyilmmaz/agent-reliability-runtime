@@ -51,6 +51,7 @@ Compose smoke demo, critical failure matrix, and contributor delivery material.
 - [ADR-0004: API security boundary](docs/adr/0004-api-security-boundary.md)
 - [Policy-aware provider routing](docs/architecture/routing-policy.md)
 - [Evaluation regression suite](docs/architecture/evaluation-regression-suite.md)
+- [Least privilege: secrets, Kubernetes, database](docs/security/least-privilege.md)
 - [10–15 minute recruiter demo](docs/recruiter-demo.md)
 - [Critical failure matrix](docs/testing/failure-matrix.md)
 
@@ -102,8 +103,13 @@ headers consistently.
 ## Kubernetes deployment
 
 The Helm chart deploys the API, worker, dispatcher, scheduler and migration Job
-as separate workloads. Configuration is a ConfigMap; connection URLs and API
-credentials are supplied only through a pre-existing Kubernetes Secret. See the
+as separate workloads. Configuration is a ConfigMap; credentials come only from
+pre-existing Kubernetes Secrets, split by role: the provider key reaches the
+worker alone, and the DDL credential reaches the migration Job alone. Every pod
+runs non-root with a read-only root filesystem, all capabilities dropped and no
+service-account token. Background workloads are probed by a heartbeat that is
+written only after real progress, not by checking that PID 1 exists. See
+[least privilege](docs/security/least-privilege.md). See the
 [kind/k3d deployment guide](docs/deployment/kubernetes.md) for a local cluster
 demo, independent worker scaling and probe verification.
 
