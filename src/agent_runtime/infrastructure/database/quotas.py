@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_runtime.application.runs import QuotaExceededError as QuotaExceededError
 from agent_runtime.infrastructure.database.models import ProviderQuota, Run
+from agent_runtime.observability.metrics import get_runtime_metrics
 
 if TYPE_CHECKING:
     from agent_runtime.settings import Settings
@@ -79,6 +80,7 @@ async def charge_provider_call(
         if row.window_start != window:
             row.window_start, row.used = window, 0
         if row.used >= limit:
+            get_runtime_metrics().security_event("quota", "denied")
             raise QuotaExceededError("Provider-call quota exceeded")
         rows.append(row)
     for row in rows:

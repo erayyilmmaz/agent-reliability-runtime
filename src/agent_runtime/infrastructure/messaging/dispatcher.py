@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_runtime.infrastructure.database.models import OutboxEvent, RunEvent
 from agent_runtime.observability.metrics import get_runtime_metrics
-from agent_runtime.observability.telemetry import extract_trace_context, get_tracer
+from agent_runtime.observability.telemetry import extract_trace_context, safe_span
 
 
 class OutboxPublisher(Protocol):
@@ -68,7 +68,7 @@ class OutboxDispatcher:
 
                 trace_context = event.payload.get("trace_context", {})
                 carrier = trace_context if isinstance(trace_context, dict) else {}
-                with get_tracer().start_as_current_span(
+                with safe_span(
                     "arr.outbox.dispatch", context=extract_trace_context(carrier)
                 ) as span:
                     span.set_attribute("arr.run_id", str(event.aggregate_id))

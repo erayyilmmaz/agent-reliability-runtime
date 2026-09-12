@@ -305,6 +305,17 @@ configured in local Compose. Local mode still requires a valid client header
 for run-scoped operations. Environment files are not loaded automatically by
 the Python process; export these variables when running local commands directly.
 
+## Audit and data protection
+
+SEC-E3 adds fail-closed audit persistence, sensitive-read audit, bounded trace
+context, sanitized exception diagnostics, and security alert rules. Deterministic
+provider echo is now **off by default**; operator-only
+`APP_DETERMINISTIC_ECHO_INPUT=true` enables input echo, never policy echo.
+See [audit, telemetry and data-protection contract](docs/security/audit-telemetry-data.md).
+The tenant envelope-encryption/retention adapter is a tested **prototype**, not
+automatic encryption of existing run data; production KMS and runtime read/write
+binding remain a separate rollout gate, as agreed for this step.
+
 ## Delivery checks
 
 The GitHub Actions workflow runs locked dependency installation, Ruff, mypy,

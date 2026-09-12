@@ -57,6 +57,11 @@ jobs:
       - uses: actions/checkout@v6
       - run: docker compose config --quiet
       - run: bash scripts/compose-smoke.sh
+      - name: Test security alert thresholds
+        run: >-
+          docker run --rm --entrypoint /bin/promtool
+          -v "$PWD/docker:/rules:ro" -w /rules
+          prom/prometheus:v3.0.1 test rules security-alerts.test.yml
 
   helm-lint:
     needs: quality

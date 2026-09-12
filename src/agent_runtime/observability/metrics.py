@@ -31,6 +31,25 @@ class RuntimeMetrics:
         self._retries_scheduled = meter.create_counter("arr.retries.scheduled", unit="{retry}")
         self._provider_fallbacks = meter.create_counter("arr.provider.fallbacks", unit="{fallback}")
         self._outbox_dispatches = meter.create_counter("arr.outbox.dispatches", unit="{event}")
+        self._security = meter.create_counter("arr.security.events", unit="{event}")
+        self._provider_calls = meter.create_counter("arr.provider.calls", unit="{call}")
+
+    def security_event(self, category: str, outcome: str) -> None:
+        self._security.add(
+            1,
+            {
+                "category": category
+                if category
+                in {"auth", "rate_limit", "audit_write", "quota", "sensitive_read", "trace_context"}
+                else "other",
+                "outcome": outcome
+                if outcome in {"allowed", "denied", "error", "success", "dropped"}
+                else "other",
+            },
+        )
+
+    def provider_call(self, provider: str) -> None:
+        self._provider_calls.add(1, {"provider": safe_provider(provider)})
 
     def run_submitted(self, provider: str) -> None:
         self._runs_submitted.add(1, {"provider": safe_provider(provider)})

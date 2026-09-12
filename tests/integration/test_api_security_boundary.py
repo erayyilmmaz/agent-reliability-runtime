@@ -78,6 +78,78 @@ class RecordingAuditSink:
         self.records.append(record)
 
 
+@pytest.mark.parametrize("policy,expected", [("fail_closed", 503), ("fail_open", 202)])
+def test_audit_failure_policy_is_explicit_and_metered(policy, expected, monkeypatch):
+    from agent_runtime.observability.metrics import get_runtime_metrics
+
+    events = []
+    monkeypatch.setattr(get_runtime_metrics(), "security_event", lambda *a: events.append(a))
+
+    class FailingSink:
+        async def record(self, record):
+            raise RuntimeError("private db error body")
+
+    service = CountingRunService()
+    with TestClient(
+        create_app(
+            secured_settings(audit_failure_policy=policy),
+            run_service=service,
+            rate_limiter=NoopRateLimiter(),
+            audit_sink=FailingSink(),
+        )
+    ) as client:
+        response = client.post("/v1/runs", headers=_headers(), json={"input": {"prompt": "secret"}})
+        assert response.status_code == expected
+        assert "private" not in response.text
+    assert service.submission_count == (1 if policy == "fail_open" else 0)
+    assert ("audit_write", "error") in events
+
+
+def test_sensitive_read_audits_success_denial_and_fail_closed_delivery():
+    service = InMemoryRunService()
+    audit = RecordingAuditSink()
+    with TestClient(
+        create_app(
+            secured_settings(),
+            run_service=service,
+            rate_limiter=NoopRateLimiter(),
+            audit_sink=audit,
+        )
+    ) as client:
+        created = client.post("/v1/runs", headers=_headers(), json={"input": {"prompt": "secret"}})
+        run_id = created.json()["run_id"]
+        for suffix, resource in [
+            ("", "run"),
+            ("/attempts", "attempts"),
+            ("/events", "events"),
+            ("/evaluations", "evaluations"),
+        ]:
+            assert client.get(f"/v1/runs/{run_id}{suffix}", headers=_headers()).status_code == 200
+            record = audit.records[-1]
+            assert record.event_type == "SENSITIVE_READ" and record.outcome == "ALLOWED"
+            assert str(record.target_run_id) == run_id and record.principal_id == "alice"
+            assert record.resource == resource
+        assert client.get(f"/v1/runs/{run_id}", headers={"X-API-Key": KEY_B}).status_code == 404
+        assert audit.records[-1].outcome == "DENIED" and audit.records[-1].principal_id == "bob"
+
+    class FailingReadSink(RecordingAuditSink):
+        async def record(self, record):
+            if record.event_type == "SENSITIVE_READ":
+                raise RuntimeError("audit unavailable")
+            await super().record(record)
+
+    with TestClient(
+        create_app(
+            secured_settings(),
+            run_service=service,
+            rate_limiter=NoopRateLimiter(),
+            audit_sink=FailingReadSink(),
+        )
+    ) as client:
+        denied = client.get(f"/v1/runs/{run_id}", headers=_headers())
+        assert denied.status_code == 503 and "execution_status" not in denied.text
+
+
 class SequenceRateLimiter:
     def __init__(self, decisions: list[RateLimitDecision]) -> None:
         self._decisions = decisions
@@ -89,6 +161,69 @@ class SequenceRateLimiter:
 
     async def close(self) -> None:
         return None
+
+
+@pytest.mark.parametrize(
+    "trust,duplicate,expected", [(False, False, False), (True, False, True), (True, True, False)]
+)
+def test_inbound_trace_trust_policy_controls_persisted_context(
+    trust, duplicate, expected, monkeypatch
+):
+    from opentelemetry.sdk.trace import TracerProvider
+
+    from agent_runtime.observability import telemetry
+
+    provider = TracerProvider()
+    monkeypatch.setattr(telemetry, "get_tracer", lambda: provider.get_tracer("test"))
+    parent = "00-00000000000000000000000000000001-0000000000000002-01"
+    contexts = []
+
+    class TraceService(CountingRunService):
+        async def submit(self, **kwargs):
+            contexts.append(telemetry.inject_trace_context())
+            return await super().submit(**kwargs)
+
+    headers = list(_headers().items()) + [("traceparent", parent)]
+    if duplicate:
+        headers.append(("traceparent", parent))
+    with TestClient(
+        create_app(
+            secured_settings(trust_inbound_trace_context=trust),
+            run_service=TraceService(),
+            rate_limiter=NoopRateLimiter(),
+        )
+    ) as client:
+        assert (
+            client.post(
+                "/v1/runs", headers=headers, json={"input": {"prompt": "ready"}}
+            ).status_code
+            == 202
+        )
+    assert (contexts[0]["traceparent"][3:35] == parent[3:35]) is expected
+    provider.shutdown()
+
+
+def test_audit_write_deadline_prevents_hanging_request():
+    import asyncio
+
+    class SlowSink:
+        async def record(self, record):
+            await asyncio.sleep(10)
+
+    with TestClient(
+        create_app(
+            secured_settings(audit_write_timeout_seconds=0.01),
+            run_service=CountingRunService(),
+            rate_limiter=NoopRateLimiter(),
+            audit_sink=SlowSink(),
+        )
+    ) as client:
+        assert (
+            client.post(
+                "/v1/runs", headers=_headers(), json={"input": {"prompt": "ready"}}
+            ).status_code
+            == 503
+        )
 
 
 def _headers(**extra: str) -> dict[str, str]:

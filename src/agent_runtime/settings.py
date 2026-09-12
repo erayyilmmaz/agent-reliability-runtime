@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     principal_provider_calls: int = Field(default=120, ge=1, le=10000)
     tenant_provider_calls: int = Field(default=240, ge=1, le=20000)
     quota_window_seconds: int = Field(default=3600, ge=60, le=86400)
+    audit_failure_policy: Literal["fail_closed", "fail_open"] = "fail_closed"
+    audit_write_timeout_seconds: float = Field(default=2, ge=0.01, le=30, allow_inf_nan=False)
+    trust_inbound_trace_context: bool = False
+    deterministic_echo_input: bool = False
+    payload_retention_days: int = Field(default=30, ge=1, le=3650)
     worker_concurrency: int = Field(default=4, ge=1, le=128)
     provider_timeout_seconds: int = Field(default=60, ge=1, le=600)
     retry_max_attempts: int = Field(default=3, ge=1, le=20)

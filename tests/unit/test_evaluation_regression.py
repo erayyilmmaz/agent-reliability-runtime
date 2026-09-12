@@ -119,6 +119,7 @@ def test_cli_writes_machine_readable_report(
 ) -> None:
     monkeypatch.setenv("APP_ENVIRONMENT", "local")
     monkeypatch.setenv("APP_AUTH_MODE", "disabled")
+    monkeypatch.setenv("APP_DETERMINISTIC_ECHO_INPUT", "true")
     dataset_path = tmp_path / "dataset.json"
     output_path = tmp_path / "report.json"
     dataset_path.write_text(

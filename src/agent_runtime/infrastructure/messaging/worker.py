@@ -22,7 +22,12 @@ from agent_runtime.infrastructure.messaging.publisher import (
     QUEUE_NAME,
     ROUTING_KEY,
 )
-from agent_runtime.observability.telemetry import extract_trace_context, get_tracer
+from agent_runtime.observability.exceptions import record_safe_exception
+from agent_runtime.observability.telemetry import (
+    extract_trace_context,
+    safe_span,
+    sanitize_trace_context,
+)
 
 
 class WorkerExecutor(Protocol):
@@ -95,7 +100,7 @@ class RabbitMqWorker:
             await message.reject(requeue=False)
             return
 
-        with get_tracer().start_as_current_span(
+        with safe_span(
             "arr.worker.process",
             context=extract_trace_context(self.trace_context_from_message(message.body)),
         ) as span:
@@ -144,6 +149,7 @@ class RabbitMqWorker:
                 timeout=retry_policy.attempt_timeout_seconds,
             )
         except Exception as exc:
+            record_safe_exception(exc, event="WORKER_EXECUTION_FAILED")
             return await self._execution_service.complete_failure(
                 run_id=claim.run_id,
                 attempt_id=claim.attempt_id,
@@ -176,15 +182,17 @@ class RabbitMqWorker:
         trace_context = payload.get("trace_context", {})
         if not isinstance(trace_context, Mapping):
             return {}
-        return {
-            key: value
-            for key, value in trace_context.items()
-            if (
-                isinstance(key, str)
-                and isinstance(value, str)
-                and key in {"traceparent", "tracestate"}
-            )
-        }
+        return sanitize_trace_context(
+            {
+                key: value
+                for key, value in trace_context.items()
+                if (
+                    isinstance(key, str)
+                    and isinstance(value, str)
+                    and key in {"traceparent", "tracestate"}
+                )
+            }
+        )
 
     @staticmethod
     def _message_payload(body: bytes) -> Mapping[str, Any]:

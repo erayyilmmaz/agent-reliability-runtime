@@ -9,6 +9,7 @@ from aio_pika.abc import AbstractChannel, AbstractConnection, AbstractExchange
 from pamqp.commands import Basic
 
 from agent_runtime.infrastructure.database.models import OutboxEvent
+from agent_runtime.observability.telemetry import sanitize_trace_context
 
 EXCHANGE_NAME = "agent_runtime"
 LEGACY_QUEUE_NAME = "agent_runtime.execution"
@@ -69,7 +70,7 @@ class RabbitMqPublisher:
         return {
             "event_id": str(event.id),
             "run_id": str(event.aggregate_id),
-            "trace_context": dict(trace_context),
+            "trace_context": sanitize_trace_context(trace_context),
         }
 
     async def close(self) -> None:

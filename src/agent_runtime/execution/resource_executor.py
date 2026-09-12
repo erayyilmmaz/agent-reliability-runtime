@@ -25,6 +25,7 @@ from agent_runtime.infrastructure.database.quotas import (
     charge_provider_call,
     lock_identity,
 )
+from agent_runtime.observability.metrics import get_runtime_metrics
 from agent_runtime.providers.registry import ProviderRegistry
 from agent_runtime.settings import Settings
 
@@ -115,6 +116,7 @@ class ResourceExecutor:
                             parent.quotas,
                         )
                 self.calls += 1
+                get_runtime_metrics().provider_call(provider)
                 tokens = min(
                     policy_snapshot.get(
                         "max_output_tokens", parent.settings.provider_max_output_tokens

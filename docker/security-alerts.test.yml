@@ -1,0 +1,212 @@
+{
+  "rule_files": [
+    "security-alerts.yml"
+  ],
+  "evaluation_interval": "1m",
+  "tests": [
+    {
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "arr_security_events_total{category=\"audit_write\",outcome=\"error\"}",
+          "values": "0+1x10"
+        },
+        {
+          "series": "arr_security_events_total{category=\"auth\",outcome=\"denied\"}",
+          "values": "0+600x10"
+        },
+        {
+          "series": "arr_security_events_total{category=\"rate_limit\",outcome=\"denied\"}",
+          "values": "0+12x10"
+        },
+        {
+          "series": "arr_security_events_total{category=\"quota\",outcome=\"denied\"}",
+          "values": "0+1x10"
+        },
+        {
+          "series": "arr_retries_scheduled_total",
+          "values": "0+120x10"
+        },
+        {
+          "series": "arr_provider_calls_total",
+          "values": "0+1200x10"
+        },
+        {
+          "series": "up{job=\"agent-reliability-runtime\"}",
+          "values": "0+0x10"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "8m",
+          "alertname": "ARRAuditWriteFailure",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "severity": "critical"
+              },
+              "exp_annotations": {
+                "summary": "Security audit persistence failed"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRAuthenticationDeniedSpike",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Authentication rejection rate is elevated"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRRateLimitSpike",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Request rate limits are repeatedly exhausted"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRQuotaExhaustion",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Tenant or principal resource quota is exhausted"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRRetryStorm",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Retry scheduling rate is elevated"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRProviderCallSpike",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Provider invocation rate is elevated"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRTelemetryUnavailable",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "severity": "critical",
+                "job": "agent-reliability-runtime"
+              },
+              "exp_annotations": {
+                "summary": "Runtime telemetry cannot be scraped"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "arr_security_events_total{category=\"audit_write\",outcome=\"error\"}",
+          "values": "0+0x10"
+        },
+        {
+          "series": "arr_security_events_total{category=\"auth\",outcome=\"denied\"}",
+          "values": "0+0x10"
+        },
+        {
+          "series": "arr_security_events_total{category=\"rate_limit\",outcome=\"denied\"}",
+          "values": "0+0x10"
+        },
+        {
+          "series": "arr_security_events_total{category=\"quota\",outcome=\"denied\"}",
+          "values": "0+0x10"
+        },
+        {
+          "series": "arr_retries_scheduled_total",
+          "values": "0+0x10"
+        },
+        {
+          "series": "arr_provider_calls_total",
+          "values": "0+0x10"
+        },
+        {
+          "series": "up{job=\"agent-reliability-runtime\"}",
+          "values": "1+0x10"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "8m",
+          "alertname": "ARRAuditWriteFailure",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRAuthenticationDeniedSpike",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRRateLimitSpike",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRQuotaExhaustion",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRRetryStorm",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRProviderCallSpike",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "ARRTelemetryUnavailable",
+          "exp_alerts": []
+        }
+      ]
+    }
+  ]
+}

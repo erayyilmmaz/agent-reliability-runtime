@@ -99,7 +99,7 @@ async def _run_worker(settings: Settings) -> None:
         executor=ResourceExecutor(
             ProviderRegistry(
                 [
-                    DeterministicProvider(),
+                    DeterministicProvider(echo_input=settings.deterministic_echo_input),
                     OpenAIResponsesProvider(
                         api_key=settings.openai_api_key,
                         base_url=str(settings.openai_base_url),

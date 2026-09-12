@@ -1,0 +1,51 @@
+groups:
+  - name: arr-security
+    rules:
+      - alert: ARRAuditWriteFailure
+        expr: sum(increase(arr_security_events_total{category="audit_write",outcome="error"}[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Security audit persistence failed
+      - alert: ARRAuthenticationDeniedSpike
+        expr: sum(rate(arr_security_events_total{category="auth",outcome="denied"}[5m])) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Authentication rejection rate is elevated
+      - alert: ARRRateLimitSpike
+        expr: sum(rate(arr_security_events_total{category="rate_limit",outcome="denied"}[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Request rate limits are repeatedly exhausted
+      - alert: ARRQuotaExhaustion
+        expr: sum(increase(arr_security_events_total{category="quota",outcome="denied"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Tenant or principal resource quota is exhausted
+      - alert: ARRRetryStorm
+        expr: sum(rate(arr_retries_scheduled_total[5m])) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Retry scheduling rate is elevated
+      - alert: ARRProviderCallSpike
+        expr: sum(rate(arr_provider_calls_total[5m])) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Provider invocation rate is elevated
+      - alert: ARRTelemetryUnavailable
+        expr: up{job="agent-reliability-runtime"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Runtime telemetry cannot be scraped

@@ -23,6 +23,11 @@ data:
   APP_PRINCIPAL_PROVIDER_CALLS: {{ .Values.config.principalProviderCalls | quote }}
   APP_TENANT_PROVIDER_CALLS: {{ .Values.config.tenantProviderCalls | quote }}
   APP_QUOTA_WINDOW_SECONDS: {{ .Values.config.quotaWindowSeconds | quote }}
+  APP_AUDIT_FAILURE_POLICY: {{ .Values.config.auditFailurePolicy | quote }}
+  APP_AUDIT_WRITE_TIMEOUT_SECONDS: {{ .Values.config.auditWriteTimeoutSeconds | quote }}
+  APP_TRUST_INBOUND_TRACE_CONTEXT: {{ .Values.config.trustInboundTraceContext | quote }}
+  APP_DETERMINISTIC_ECHO_INPUT: {{ .Values.config.deterministicEchoInput | quote }}
+  APP_PAYLOAD_RETENTION_DAYS: {{ .Values.config.payloadRetentionDays | quote }}
   APP_RETRY_MAX_ATTEMPTS: {{ .Values.config.retryMaxAttempts | quote }}
   APP_RETRY_BASE_DELAY_SECONDS: {{ .Values.config.retryBaseDelaySeconds | quote }}
   APP_RETRY_MAX_BACKOFF_SECONDS: {{ .Values.config.retryMaxBackoffSeconds | quote }}

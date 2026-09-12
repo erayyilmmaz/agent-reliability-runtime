@@ -31,7 +31,7 @@ from agent_runtime.infrastructure.database.models import (
 )
 from agent_runtime.infrastructure.database.quotas import QuotaLimits, check_admission, lock_identity
 from agent_runtime.observability.metrics import get_runtime_metrics
-from agent_runtime.observability.telemetry import get_tracer, inject_trace_context
+from agent_runtime.observability.telemetry import inject_trace_context, safe_span
 
 
 def _routing_decision(policy_snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -74,7 +74,7 @@ class SqlAlchemyRunService:
             else {**policy_snapshot, "work_kind": work_kind},
         )
 
-        with get_tracer().start_as_current_span("arr.db.run.submit") as span:
+        with safe_span("arr.db.run.submit") as span:
             async with self._session_factory() as session:
                 try:
                     async with session.begin():
@@ -323,7 +323,7 @@ class SqlAlchemyRunService:
         """Create a distinct durable run from an immutable source snapshot."""
 
         principal_id = principal_id or client_id
-        with get_tracer().start_as_current_span("arr.db.run.replay") as span:
+        with safe_span("arr.db.run.replay") as span:
             async with self._session_factory() as session:
                 try:
                     async with session.begin():

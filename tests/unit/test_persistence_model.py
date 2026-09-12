@@ -10,6 +10,7 @@ def test_metadata_contains_every_durable_runtime_entity() -> None:
         "evaluations",
         "security_audit_events",
         "provider_quotas",
+        "tenant_keys",
     }
 
 
@@ -51,5 +52,8 @@ def test_security_audit_excludes_request_and_secret_columns() -> None:
         "reason",
         "client_id",
         "credential_fingerprint",
+        "principal_id",
+        "target_run_id",
+        "resource",
         "created_at",
     }

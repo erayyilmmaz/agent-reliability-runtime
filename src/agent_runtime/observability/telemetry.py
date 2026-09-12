@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 
-from opentelemetry import metrics, propagate, trace
+from opentelemetry import metrics, trace
 from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -12,7 +14,9 @@ from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
+from agent_runtime.observability.exceptions import record_safe_exception
 from agent_runtime.settings import Settings
 
 TRACER_NAME = "agent_runtime"
@@ -58,9 +62,59 @@ def get_tracer() -> trace.Tracer:
 
 def inject_trace_context() -> dict[str, str]:
     carrier: dict[str, str] = {}
-    propagate.inject(carrier)
-    return carrier
+    TraceContextTextMapPropagator().inject(carrier)
+    return sanitize_trace_context(carrier)
 
 
 def extract_trace_context(carrier: Mapping[str, str]) -> Context:
-    return propagate.extract(carrier)
+    return TraceContextTextMapPropagator().extract(
+        sanitize_trace_context(carrier), context=Context()
+    )
+
+
+def sanitize_trace_context(carrier: Mapping[str, str]) -> dict[str, str]:
+    parent = carrier.get("traceparent", "")
+    if not isinstance(parent, str) or not re.fullmatch(
+        r"00-[0-9a-f]{32}-[0-9a-f]{16}-0[0-3]", parent
+    ):
+        return {}
+    if int(parent[3:35], 16) == 0 or int(parent[36:52], 16) == 0:
+        return {}
+    result = {"traceparent": parent}
+    state = carrier.get("tracestate", "")
+    if not isinstance(state, str) or not state or len(state) > 512:
+        return result
+    entries = state.split(",")
+    seen = set()
+    if len(entries) > 32:
+        return result
+    for entry in entries:
+        key, separator, value = entry.strip(" \t").partition("=")
+        if (
+            not separator
+            or key in seen
+            or not re.fullmatch(
+                r"(?:[a-z][a-z0-9_*/-]{0,255}|[a-z0-9][a-z0-9_*/-]{0,240}@[a-z][a-z0-9_*/-]{0,13})",
+                key,
+            )
+            or not 1 <= len(value) <= 256
+            or value.endswith(" ")
+            or any(ord(c) < 32 or ord(c) > 126 or c in ",=" for c in value)
+        ):
+            return result
+        seen.add(key)
+    result["tracestate"] = state
+    return result
+
+
+@contextmanager
+def safe_span(name: str, *, context: Context | None = None) -> Iterator[trace.Span]:
+    # OTel's default context manager records str(exc) and the raw traceback.
+    with get_tracer().start_as_current_span(
+        name, context=context, record_exception=False, set_status_on_exception=False
+    ) as span:
+        try:
+            yield span
+        except BaseException as exc:
+            record_safe_exception(exc, event="SPAN_FAILURE")
+            raise

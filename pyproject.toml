@@ -12,6 +12,7 @@ dependencies = [
   "aio-pika>=9.5,<10",
   "alembic>=1.14,<2",
   "asyncpg>=0.30,<1",
+  "cryptography>=46,<51",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
   "jsonschema>=4.23,<5",
@@ -43,6 +44,7 @@ agent-runtime-worker = "agent_runtime.processes:run_worker"
 agent-runtime-recovery = "agent_runtime.processes:run_recovery"
 agent-runtime-credential = "agent_runtime.security.cli:main"
 agent-runtime-regression = "agent_runtime.evaluation.cli:main"
+agent-runtime-retention = "agent_runtime.security.retention_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_runtime"]

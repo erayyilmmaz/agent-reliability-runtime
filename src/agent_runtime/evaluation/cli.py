@@ -87,7 +87,7 @@ def _load_json(path: str) -> dict[str, Any]:
 def _provider_registry(settings: Settings) -> ProviderRegistry:
     return ProviderRegistry(
         [
-            DeterministicProvider(),
+            DeterministicProvider(echo_input=settings.deterministic_echo_input),
             OpenAIResponsesProvider(
                 api_key=settings.openai_api_key,
                 base_url=str(settings.openai_base_url),

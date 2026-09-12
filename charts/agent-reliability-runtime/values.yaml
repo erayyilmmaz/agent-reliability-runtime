@@ -36,6 +36,11 @@ config:
   principalProviderCalls: 120
   tenantProviderCalls: 240
   quotaWindowSeconds: 3600
+  auditFailurePolicy: fail_closed
+  auditWriteTimeoutSeconds: 2
+  trustInboundTraceContext: false
+  deterministicEchoInput: false
+  payloadRetentionDays: 30
   retryMaxAttempts: 3
   retryBaseDelaySeconds: 1
   retryMaxBackoffSeconds: 60

@@ -6,6 +6,8 @@ from typing import Any
 
 from opentelemetry import trace
 
+from agent_runtime.observability.exceptions import safe_exception_context
+
 _SAFE_LOG_FIELDS = frozenset({"event", "run_id", "attempt_id", "provider", "error_code"})
 
 
@@ -18,12 +20,18 @@ class JsonFormatter(logging.Formatter):
             "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            # Library log arguments and exception messages can contain URLs, SQL and secrets.
+            "message": "runtime event",
         }
         for field in _SAFE_LOG_FIELDS:
             value = getattr(record, field, None)
             if value is not None:
                 payload[field] = str(value)
+        if record.exc_info and record.exc_info[1] is not None:
+            payload.update(safe_exception_context(record.exc_info[1]))
+        elif hasattr(record, "exception_type"):
+            payload["exception_type"] = record.exception_type
+            payload["exception_frames"] = getattr(record, "exception_frames", [])
         if span_context.is_valid:
             payload["trace_id"] = format(span_context.trace_id, "032x")
             payload["span_id"] = format(span_context.span_id, "016x")

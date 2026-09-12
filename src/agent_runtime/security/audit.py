@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Protocol
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -17,6 +18,9 @@ class SecurityAuditRecord:
     reason: str
     client_id: str | None
     credential_fingerprint: str | None
+    principal_id: str | None = None
+    target_run_id: UUID | None = None
+    resource: str | None = None
 
 
 class SecurityAuditSink(Protocol):
@@ -32,11 +36,16 @@ class SqlAlchemySecurityAuditSink:
             async with session.begin():
                 session.add(
                     SecurityAuditEvent(
-                        event_type=record.event_type,
-                        outcome=record.outcome,
-                        reason=record.reason,
-                        client_id=record.client_id,
-                        credential_fingerprint=record.credential_fingerprint,
+                        event_type=safe_text(record.event_type, 64),
+                        outcome=safe_text(record.outcome, 16),
+                        reason=safe_text(record.reason, 64),
+                        client_id=safe_text(record.client_id, 128),
+                        credential_fingerprint=safe_text(record.credential_fingerprint, 64),
+                        principal_id=safe_text(record.principal_id, 128),
+                        target_run_id=record.target_run_id,
+                        resource=record.resource
+                        if record.resource in {"run", "attempts", "events", "evaluations", "job"}
+                        else None,
                     )
                 )
 
@@ -44,3 +53,10 @@ class SqlAlchemySecurityAuditSink:
 class NoopSecurityAuditSink:
     async def record(self, record: SecurityAuditRecord) -> None:
         del record
+
+
+def safe_text(value: str | None, limit: int) -> str | None:
+    """Truncate at the persistence boundary and reject control/surrogate characters."""
+    if value is None:
+        return None
+    return "".join(c if 32 <= ord(c) < 127 else "_" for c in value[:limit])

@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from agent_runtime.application.execution import ExecutionResult
-from agent_runtime.observability.telemetry import get_tracer
+from agent_runtime.observability.telemetry import safe_span
 from agent_runtime.providers.contracts import ProviderAdapter, ProviderConfigurationError
 
 
@@ -26,7 +26,7 @@ class ProviderRegistry:
         adapter = self._adapters.get(provider)
         if adapter is None:
             raise ProviderConfigurationError(f"Provider '{provider}' is not configured")
-        with get_tracer().start_as_current_span("arr.provider.execute") as span:
+        with safe_span("arr.provider.execute") as span:
             span.set_attribute("arr.provider", provider)
             return await adapter.execute(
                 input_payload=input_payload, policy_snapshot=policy_snapshot

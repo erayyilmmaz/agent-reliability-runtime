@@ -28,7 +28,7 @@ def test_outbox_message_is_minimal_and_correlatable() -> None:
     ) == {
         "event_id": "00000000-0000-0000-0000-000000000001",
         "run_id": "00000000-0000-0000-0000-000000000002",
-        "trace_context": {"traceparent": "00-abc"},
+        "trace_context": {},
     }
 
 

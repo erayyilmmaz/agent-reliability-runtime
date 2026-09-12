@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging
+import asyncio
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -55,7 +55,13 @@ from agent_runtime.infrastructure.redis.rate_limiter import (
     RateLimitUnavailable,
     RedisFixedWindowRateLimiter,
 )
-from agent_runtime.observability.telemetry import extract_trace_context, get_tracer
+from agent_runtime.observability.exceptions import record_safe_exception
+from agent_runtime.observability.metrics import get_runtime_metrics
+from agent_runtime.observability.telemetry import (
+    extract_trace_context,
+    safe_span,
+    sanitize_trace_context,
+)
 from agent_runtime.security import (
     NoopSecurityAuditSink,
     SecurityAuditRecord,
@@ -213,25 +219,32 @@ def create_app(
         reason: str,
         client_id: str | None,
         credential_fingerprint: str | None,
-    ) -> None:
+        principal_id: str | None = None,
+        target_run_id: UUID | None = None,
+        resource: str | None = None,
+    ) -> bool:
         try:
-            await audit_sink.record(
-                SecurityAuditRecord(
-                    event_type=event_type,
-                    outcome=outcome,
-                    reason=reason,
-                    client_id=client_id,
-                    credential_fingerprint=credential_fingerprint,
-                )
+            await asyncio.wait_for(
+                audit_sink.record(
+                    SecurityAuditRecord(
+                        event_type=event_type,
+                        outcome=outcome,
+                        reason=reason,
+                        client_id=client_id,
+                        credential_fingerprint=credential_fingerprint,
+                        principal_id=principal_id,
+                        target_run_id=target_run_id,
+                        resource=resource,
+                    )
+                ),
+                timeout=runtime_settings.audit_write_timeout_seconds,
             )
-        except Exception:
-            logging.getLogger(__name__).error(
-                "security audit persistence failed",
-                extra={
-                    "event": "SECURITY_AUDIT_PERSIST_FAILED",
-                    "error_code": "AUDIT_WRITE_FAILED",
-                },
-            )
+            get_runtime_metrics().security_event("audit_write", "success")
+            return True
+        except Exception as exc:
+            get_runtime_metrics().security_event("audit_write", "error")
+            record_safe_exception(exc, event="AUDIT_WRITE_FAILED")
+            return runtime_settings.audit_failure_policy == "fail_open"
 
     @app.middleware("http")
     async def enforce_security_boundary(request: Request, call_next: Any) -> Any:
@@ -259,6 +272,7 @@ def create_app(
             )
         )
         if not authentication.authenticated:
+            get_runtime_metrics().security_event("auth", "denied")
             status_code = (
                 status.HTTP_401_UNAUTHORIZED
                 if authentication.failure_code == "AUTHENTICATION_REQUIRED"
@@ -284,12 +298,14 @@ def create_app(
         client_id = authentication.tenant_id
         request.state.tenant_id = client_id
         request.state.principal_id = authentication.principal_id
+        get_runtime_metrics().security_event("auth", "allowed")
         if runtime_settings.auth_mode == "api_key":
             if authentication.principal_id is None or client_id is None:
                 raise RuntimeError("Authenticated credential has no identity binding")
             try:
                 decision = await rate_limiter.check(authentication.principal_id)
             except RateLimitUnavailable:
+                get_runtime_metrics().security_event("rate_limit", "error")
                 await write_security_audit(
                     event_type="RATE_LIMIT",
                     outcome="ERROR",
@@ -303,6 +319,7 @@ def create_app(
                     "Request rate limiting is temporarily unavailable.",
                 )
             if not decision.allowed:
+                get_runtime_metrics().security_event("rate_limit", "denied")
                 await write_security_audit(
                     event_type="RATE_LIMIT",
                     outcome="DENIED",
@@ -318,14 +335,52 @@ def create_app(
                 )
 
         if runtime_settings.auth_mode == "api_key":
-            await write_security_audit(
+            audited = await write_security_audit(
                 event_type="AUTHENTICATION",
                 outcome="ALLOWED",
                 reason="AUTHENTICATED",
                 client_id=client_id,
                 credential_fingerprint=authentication.credential_fingerprint,
+                principal_id=authentication.principal_id,
             )
-        return await call_next(request)
+            if not audited:
+                return _security_error(503, "AUDIT_UNAVAILABLE", "Security audit is unavailable.")
+
+        async def audit_read(status_code: int) -> bool:
+            match = re.fullmatch(
+                r"/v1/(runs|jobs)/([0-9a-fA-F-]{36})(?:/(attempts|events|evaluations))?",
+                request.url.path,
+            )
+            if request.method != "GET" or not match:
+                return True
+            try:
+                target = UUID(match[2])
+            except ValueError:
+                return True
+            resource = match[3] or ("job" if match[1] == "jobs" else "run")
+            outcome = (
+                "ALLOWED" if status_code < 400 else ("ERROR" if status_code >= 500 else "DENIED")
+            )
+            get_runtime_metrics().security_event("sensitive_read", outcome.lower())
+            return await write_security_audit(
+                event_type="SENSITIVE_READ",
+                outcome=outcome,
+                reason="READ_COMPLETED" if outcome == "ALLOWED" else "READ_REJECTED",
+                client_id=client_id,
+                principal_id=authentication.principal_id,
+                credential_fingerprint=authentication.credential_fingerprint,
+                target_run_id=target,
+                resource=resource,
+            )
+
+        try:
+            response = await call_next(request)
+        except Exception:
+            await audit_read(500)
+            raise
+        if not await audit_read(response.status_code):
+            return _security_error(503, "AUDIT_UNAVAILABLE", "Security audit is unavailable.")
+        return response
 
     @app.middleware("http")
     async def trace_http_request(request: Request, call_next: Any) -> Any:
@@ -334,14 +389,19 @@ def create_app(
             for header in ("traceparent", "tracestate")
             if header in request.headers
         }
-        with get_tracer().start_as_current_span(
-            f"HTTP {request.method}", context=extract_trace_context(carrier)
-        ) as span:
+        valid = sanitize_trace_context(carrier)
+        if not runtime_settings.trust_inbound_trace_context or any(
+            len(request.headers.getlist(h)) > 1 for h in ("traceparent", "tracestate")
+        ):
+            valid = {}
+        if carrier != valid:
+            get_runtime_metrics().security_event("trace_context", "dropped")
+        with safe_span(f"HTTP {request.method}", context=extract_trace_context(valid)) as span:
             span.set_attribute("http.request.method", request.method)
             try:
                 response = await call_next(request)
             except Exception as exc:
-                span.record_exception(exc)
+                record_safe_exception(exc, event="API_REQUEST_FAILED")
                 raise
             span.set_attribute("http.response.status_code", response.status_code)
             return response
@@ -371,6 +431,7 @@ def create_app(
 
     @app.exception_handler(QuotaExceededError)
     async def quota_error_handler(_: Request, exc: QuotaExceededError) -> JSONResponse:
+        get_runtime_metrics().security_event("quota", "denied")
         return _security_error(
             429,
             "RESOURCE_QUOTA_EXCEEDED",
@@ -384,10 +445,7 @@ def create_app(
 
     @app.exception_handler(Exception)
     async def internal_error_handler(_: Request, exc: Exception) -> JSONResponse:
-        logging.getLogger(__name__).error(
-            "unhandled api error",
-            extra={"event": "API_UNHANDLED_ERROR", "error_code": type(exc).__name__},
-        )
+        record_safe_exception(exc, event="API_UNHANDLED_ERROR")
         return _security_error(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
