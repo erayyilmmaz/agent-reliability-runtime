@@ -32,6 +32,39 @@
 >   encryption/crypto-shredding design and interface are in place; binding it to
 >   a production key-management service is a deliberate deferral.
 >
+> ### Security-relevant changes made *after* remediation
+>
+> Later performance work (`docs/performance-audit.md`) touched three surfaces
+> this report reasons about. They are listed here so this document does not
+> quietly describe a system that has moved on.
+>
+> - **The append-only trigger now has a deliberate delete gate.** SEC-018 below
+>   quotes `prevent_security_audit_mutation()` as raising unconditionally. On
+>   `main` it still refuses every `UPDATE` and every `DELETE`, *unless* the
+>   deleting transaction has set `arr.allow_audit_purge = 'on'` via `SET LOCAL`.
+>   This exists so `security_audit_events`, which grows with read traffic and had
+>   no upper bound, can be aged out (PERF-005). The gate is **not** a security
+>   boundary and is not offered as one: per SEC-018's own remediation
+>   `arr_runtime` holds `INSERT` only on that table and cannot delete whatever it
+>   sets. What changed is that the *owner* now has a supported, single-transaction
+>   way to purge instead of `ALTER TABLE ... DISABLE TRIGGER ALL`, which is
+>   narrower in blast radius than the escape hatch SEC-018 describes. See
+>   [`docs/security/audit-telemetry-data.md`](docs/security/audit-telemetry-data.md).
+> - **One audit row per authenticated read, not two.** The redundant
+>   `AUTHENTICATION` row was removed where a `SENSITIVE_READ` row is also written
+>   (PERF-003). `SENSITIVE_READ` is a strict superset — same principal, tenant and
+>   outcome, plus the target — so no audit information was lost; a CI invariant
+>   asserts the remaining row is still written for every authenticated read.
+> - **Responses above 1 KiB are now gzip-compressed** (PERF-007). Compression of
+>   authenticated responses raises a BREACH/CRIME-class question, so to be
+>   explicit: the preconditions are not met here. No secret is carried in a
+>   response body — credentials travel in the `X-API-Key` request header and are
+>   never echoed — and cross-tenant reads return `404`, so an attacker cannot
+>   observe the sizes of another tenant's responses to compare against input they
+>   control. Compression is disabled by setting
+>   `APP_RESPONSE_COMPRESSION_MIN_BYTES=0` if a deployment prefers to terminate it
+>   at the ingress.
+>
 > The report is published as a record of the review and its method, not as a
 > live vulnerability disclosure. If you are running a build at or before
 > `27b1d16`, the findings apply to you — upgrade.
@@ -2791,6 +2824,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 ```
+
+> As audited. On `main` this function additionally admits a `DELETE` from a
+> transaction that has explicitly set `arr.allow_audit_purge` — see
+> "Security-relevant changes made after remediation" at the top of this report.
 
 This is genuinely good design — durable, database-enforced, not application-enforced. But because the
 API's own role owns those triggers, an attacker with code execution in the API pod can issue

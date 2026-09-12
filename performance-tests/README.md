@@ -40,8 +40,12 @@ uv sync --dev
 
 **These scenarios must never be pointed at production or at a shared staging
 environment.** They create durable runs, consume provider-call quota, and write
-audit rows that cannot be deleted (the audit and event tables are append-only
-by database trigger).
+audit rows that no ordinary cleanup removes — `run_events` and
+`security_audit_events` are append-only by database trigger, and the runtime
+role holds `INSERT` only on both (SEC-018). Audit rows can be aged out, but
+only by an operator running `agent-runtime-audit-purge` with the DDL credential
+against a horizon they have configured, which is not something to do to clear
+up after a load test.
 
 The intended target is the disposable local Compose stack. `stress` and `spike`
 in particular drive the API into saturation on purpose.
