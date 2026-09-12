@@ -24,6 +24,18 @@ config:
   openaiDefaultModel: gpt-5
   workerConcurrency: 4
   providerTimeoutSeconds: 60
+  maxRequestBytes: 131072
+  requestBodyTimeoutSeconds: 10
+  regressionMaxCases: 10
+  regressionProviderCallBudget: 20
+  providerMaxOutputTokens: 2048
+  principalConcurrentRuns: 20
+  tenantConcurrentRuns: 40
+  principalRunningRuns: 1
+  tenantRunningRuns: 2
+  principalProviderCalls: 120
+  tenantProviderCalls: 240
+  quotaWindowSeconds: 3600
   retryMaxAttempts: 3
   retryBaseDelaySeconds: 1
   retryMaxBackoffSeconds: 60

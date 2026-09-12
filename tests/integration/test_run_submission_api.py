@@ -44,6 +44,7 @@ class InMemoryRunService:
         idempotency_key: str,
         input_payload: dict[str, Any],
         policy_snapshot: dict[str, Any],
+        principal_id: str | None = None,
     ) -> tuple[RunSnapshot, bool]:
         request_hash = canonical_request_hash(input_payload, policy_snapshot)
         key = (client_id, idempotency_key)
@@ -80,16 +81,25 @@ class InMemoryRunService:
             raise RunNotFoundError(f"Run {run_id} was not found")
         return run
 
-    async def get_attempts(self, *, client_id: str, run_id: uuid.UUID) -> list[AttemptSnapshot]:
+    async def get_attempts(
+        self, *, client_id: str, run_id: uuid.UUID, limit: int = 50, cursor: uuid.UUID | None = None
+    ) -> list[AttemptSnapshot]:
         await self.get_run(client_id=client_id, run_id=run_id)
         return []
 
-    async def get_events(self, *, client_id: str, run_id: uuid.UUID) -> list[EventSnapshot]:
+    async def get_events(
+        self, *, client_id: str, run_id: uuid.UUID, limit: int = 50, cursor: uuid.UUID | None = None
+    ) -> list[EventSnapshot]:
         await self.get_run(client_id=client_id, run_id=run_id)
         return []
 
     async def evaluate(
-        self, *, client_id: str, run_id: uuid.UUID, rules: list[dict[str, Any]]
+        self,
+        *,
+        client_id: str,
+        run_id: uuid.UUID,
+        rules: list[dict[str, Any]],
+        principal_id: str | None = None,
     ) -> EvaluationSnapshot:
         run = await self.get_run(client_id=client_id, run_id=run_id)
         if run.execution_status != ExecutionStatus.SUCCEEDED:
@@ -99,25 +109,30 @@ class InMemoryRunService:
         evaluation = EvaluationSnapshot(
             id=uuid.uuid4(),
             evaluator="deterministic_rules",
-            status=EvaluationStatus.FAILED,
+            status=EvaluationStatus.PENDING,
             score=None,
-            result={"passed": False, "rules": [{"type": rules[0]["type"], "passed": False}]},
+            result=None,
             details={"rule_count": len(rules)},
             created_at=datetime.now(UTC),
-            completed_at=datetime.now(UTC),
+            completed_at=None,
         )
         self._evaluations.setdefault(run_id, []).append(evaluation)
         self._runs[run_id] = replace(run, evaluation_status=evaluation.status)
         return evaluation
 
     async def get_evaluations(
-        self, *, client_id: str, run_id: uuid.UUID
+        self, *, client_id: str, run_id: uuid.UUID, limit: int = 50, cursor: uuid.UUID | None = None
     ) -> list[EvaluationSnapshot]:
         await self.get_run(client_id=client_id, run_id=run_id)
         return self._evaluations.get(run_id, [])
 
     async def replay(
-        self, *, client_id: str, run_id: uuid.UUID, idempotency_key: str
+        self,
+        *,
+        client_id: str,
+        run_id: uuid.UUID,
+        idempotency_key: str,
+        principal_id: str | None = None,
     ) -> tuple[RunSnapshot, bool]:
         source = await self.get_run(client_id=client_id, run_id=run_id)
         key = (client_id, idempotency_key)
@@ -196,7 +211,7 @@ def test_create_run_exposes_durable_routing_decision() -> None:
     assert fetched.json()["routing_decision"] == decision
 
 
-def test_evaluation_regression_api_returns_machine_readable_report() -> None:
+def test_regression_api_requires_authenticated_mode_even_for_local_demo() -> None:
     service = InMemoryRunService()
     with _client(service) as client:
         response = client.post(
@@ -225,11 +240,8 @@ def test_evaluation_regression_api_returns_machine_readable_report() -> None:
             },
         )
 
-    assert response.status_code == 200
-    report = response.json()
-    assert report["schema_version"] == "evaluation-regression-report.v1"
-    assert report["comparison"]["quality"]["delta_points"] == 0.0
-    assert report["passed"] is True
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
 
 
 def test_concurrent_identical_submissions_create_one_run() -> None:
@@ -346,10 +358,10 @@ def test_evaluation_failure_does_not_change_successful_execution() -> None:
         )
         run = client.get(f"/v1/runs/{succeeded.id}", headers={"X-Client-Id": "test-client"})
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "FAILED"
+    assert response.status_code == 202
+    assert response.json()["status"] == "PENDING"
     assert run.json()["execution_status"] == "SUCCEEDED"
-    assert run.json()["evaluation_status"] == "FAILED"
+    assert run.json()["evaluation_status"] == "PENDING"
 
 
 def test_replay_creates_a_new_run_and_is_idempotent() -> None:

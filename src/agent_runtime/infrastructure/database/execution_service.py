@@ -9,8 +9,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_runtime.application.execution import ClaimDecision, ClaimResult, ExecutionResult
 from agent_runtime.domain.retry import RetryPolicy, is_retryable_error
-from agent_runtime.domain.states import ExecutionStatus, is_terminal_execution_status
-from agent_runtime.infrastructure.database.models import OutboxEvent, Run, RunAttempt, RunEvent
+from agent_runtime.domain.states import (
+    EvaluationStatus,
+    ExecutionStatus,
+    is_terminal_execution_status,
+)
+from agent_runtime.infrastructure.database.models import (
+    Evaluation,
+    OutboxEvent,
+    Run,
+    RunAttempt,
+    RunEvent,
+)
+from agent_runtime.infrastructure.database.quotas import QuotaLimits, lock_identity
 from agent_runtime.observability.metrics import get_runtime_metrics
 
 
@@ -18,16 +29,30 @@ class ExecutionPersistenceService:
     """Owns durable claims, attempts, terminal writes, and stale lease recovery."""
 
     def __init__(
-        self, session_factory: async_sessionmaker[AsyncSession], *, lease_seconds: int
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        lease_seconds: int,
+        quotas: QuotaLimits | None = None,
+        max_attempts: int = 3,
     ) -> None:
         self._session_factory = session_factory
         self._lease_seconds = lease_seconds
+        self._quotas = quotas or QuotaLimits()
+        self._max_attempts = max_attempts
 
     async def claim(self, *, run_id: UUID, worker_id: str) -> ClaimResult:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
             async with session.begin():
+                identity = await session.get(Run, run_id)
+                if identity is None:
+                    return ClaimResult(decision=ClaimDecision.MISSING, run_id=run_id)
+                await lock_identity(
+                    session, identity.principal_id or identity.client_id, identity.client_id
+                )
                 run = await self._locked_run(session, run_id)
+                now = datetime.now(UTC)
                 if run is None:
                     return ClaimResult(decision=ClaimDecision.MISSING, run_id=run_id)
                 if is_terminal_execution_status(run.execution_status):
@@ -42,8 +67,31 @@ class ExecutionPersistenceService:
                 if run.execution_status != ExecutionStatus.QUEUED:
                     return ClaimResult(decision=ClaimDecision.NOT_READY, run_id=run.id)
 
+                principal = run.principal_id or run.client_id
+                for condition, limit in (
+                    (Run.principal_id == principal, self._quotas.principal_running),
+                    (Run.client_id == run.client_id, self._quotas.tenant_running),
+                ):
+                    count = await session.scalar(
+                        select(func.count())
+                        .select_from(Run)
+                        .where(condition, Run.execution_status == ExecutionStatus.RUNNING)
+                    )
+                    if int(count or 0) >= limit:
+                        run.execution_status = ExecutionStatus.RETRY_SCHEDULED
+                        run.next_attempt_at = now + timedelta(seconds=1)
+                        return ClaimResult(decision=ClaimDecision.NOT_READY, run_id=run.id)
                 attempt_number = await self._next_attempt_number(session, run.id)
-                retry_policy = RetryPolicy.from_snapshot(run.policy_snapshot)
+                try:
+                    retry_policy = RetryPolicy.from_snapshot(run.policy_snapshot)
+                    if attempt_number > min(retry_policy.max_attempts, self._max_attempts):
+                        raise ValueError("Attempt budget exhausted")
+                except ValueError:
+                    run.execution_status = ExecutionStatus.FAILED
+                    run.error_code = "INVALID_STORED_POLICY"
+                    run.completed_at = now
+                    await self._finalize_evaluation_job(session, run)
+                    return ClaimResult(decision=ClaimDecision.TERMINAL, run_id=run.id)
                 provider = retry_policy.provider_order[
                     min(attempt_number - 1, len(retry_policy.provider_order) - 1)
                 ]
@@ -81,7 +129,12 @@ class ExecutionPersistenceService:
                     run_id=run.id,
                     attempt_id=attempt.id,
                     input_payload=run.input_payload,
-                    policy_snapshot=run.policy_snapshot,
+                    policy_snapshot={
+                        **run.policy_snapshot,
+                        "attempt_timeout_seconds": min(
+                            retry_policy.attempt_timeout_seconds, self._lease_seconds - 1
+                        ),
+                    },
                     provider=provider,
                 )
 
@@ -100,7 +153,7 @@ class ExecutionPersistenceService:
                 if run is None or not self._owns_active_lease(run, worker_id, now):
                     return False
                 attempt = await self._locked_attempt(session, attempt_id)
-                if attempt is None or attempt.run_id != run.id:
+                if attempt is None or attempt.run_id != run.id or attempt.finished_at is not None:
                     return False
                 attempt.provider = result.provider
                 attempt.usage_metadata = result.usage_metadata
@@ -124,6 +177,7 @@ class ExecutionPersistenceService:
                         metadata_={"provider": result.provider},
                     )
                 )
+                await self._finalize_evaluation_job(session, run)
                 return True
 
     async def complete_failure(
@@ -141,13 +195,13 @@ class ExecutionPersistenceService:
                 if run is None or not self._owns_active_lease(run, worker_id, now):
                     return False
                 attempt = await self._locked_attempt(session, attempt_id)
-                if attempt is None or attempt.run_id != run.id:
+                if attempt is None or attempt.run_id != run.id or attempt.finished_at is not None:
                     return False
                 self._finish_failed_attempt(attempt, now, error_code)
                 get_runtime_metrics().attempt_completed(
                     provider=attempt.provider, outcome="FAILED", error_code=error_code
                 )
-                self._schedule_retry_or_finalize(
+                await self._schedule_retry_or_finalize(
                     session=session,
                     run=run,
                     attempt=attempt,
@@ -183,7 +237,7 @@ class ExecutionPersistenceService:
                         outcome="LEASE_EXPIRED",
                         error_code="EXECUTION_LEASE_EXPIRED",
                     )
-                    self._schedule_retry_or_finalize(
+                    await self._schedule_retry_or_finalize(
                         session=session,
                         run=run,
                         attempt=attempt,
@@ -235,7 +289,12 @@ class ExecutionPersistenceService:
     async def _locked_run(session: AsyncSession, run_id: UUID) -> Run | None:
         return cast(
             Run | None,
-            await session.scalar(select(Run).where(Run.id == run_id).with_for_update()),
+            await session.scalar(
+                select(Run)
+                .where(Run.id == run_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ),
         )
 
     @staticmethod
@@ -289,7 +348,7 @@ class ExecutionPersistenceService:
         run_attempt.retryable = is_retryable_error(error_code)
         run_attempt.latency_ms = int((now - run_attempt.started_at).total_seconds() * 1000)
 
-    def _schedule_retry_or_finalize(
+    async def _schedule_retry_or_finalize(
         self,
         *,
         session: AsyncSession,
@@ -354,5 +413,47 @@ class ExecutionPersistenceService:
                 attempt_id=attempt.id,
                 event_type=event_type,
                 metadata_=metadata,
+            )
+        )
+
+        await self._finalize_evaluation_job(session, run)
+
+    @staticmethod
+    async def _finalize_evaluation_job(session: AsyncSession, run: Run) -> None:
+        if run.work_kind != "evaluation":
+            return
+        evaluation = await session.scalar(
+            select(Evaluation).where(Evaluation.job_run_id == run.id).with_for_update()
+        )
+        if evaluation is None:
+            raise RuntimeError("Evaluation job has no lifecycle record")
+        if run.execution_status == ExecutionStatus.SUCCEEDED:
+            evaluation.status = (
+                EvaluationStatus.PASSED
+                if (run.result_payload or {}).get("passed")
+                else EvaluationStatus.FAILED
+            )
+            evaluation.result = run.result_payload
+        else:
+            evaluation.status = EvaluationStatus.ERROR
+            evaluation.details = {
+                **(evaluation.details or {}),
+                "error_code": run.error_code or "EVALUATION_ERROR",
+            }
+        evaluation.completed_at = run.completed_at
+        source = await session.get(Run, evaluation.run_id, with_for_update=True)
+        latest = await session.scalar(
+            select(Evaluation.id)
+            .where(Evaluation.run_id == evaluation.run_id)
+            .order_by(Evaluation.created_at.desc(), Evaluation.id.desc())
+            .limit(1)
+        )
+        if source is not None and latest == evaluation.id:
+            source.evaluation_status = evaluation.status
+        session.add(
+            RunEvent(
+                run_id=evaluation.run_id,
+                event_type=f"EVALUATION_{evaluation.status}",
+                metadata_={"job_run_id": str(run.id)},
             )
         )

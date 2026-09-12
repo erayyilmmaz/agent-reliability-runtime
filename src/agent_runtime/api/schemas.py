@@ -6,7 +6,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
+from agent_runtime.domain.policy import RunPolicyRequest
 from agent_runtime.domain.states import EvaluationStatus, ExecutionStatus
+from agent_runtime.evaluation.safety import validate_rules
 
 MAX_INPUT_BYTES = 65_536
 MAX_REQUEST_BYTES = 131_072
@@ -16,7 +18,7 @@ class CreateRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     input: dict[str, JsonValue] = Field(min_length=1)
-    policy: dict[str, JsonValue] = Field(default_factory=dict)
+    policy: RunPolicyRequest = Field(default_factory=RunPolicyRequest)
 
     @model_validator(mode="after")
     def validate_input_size(self) -> CreateRunRequest:
@@ -70,7 +72,12 @@ class EventResponse(BaseModel):
 class EvaluateRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    rules: list[dict[str, JsonValue]] = Field(min_length=1, max_length=32)
+    rules: list[dict[str, JsonValue]] = Field(min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def safe_rules(self) -> EvaluateRunRequest:
+        validate_rules(self.rules)
+        return self
 
 
 class EvaluationRegressionCaseRequest(BaseModel):
@@ -78,7 +85,12 @@ class EvaluationRegressionCaseRequest(BaseModel):
 
     case_id: str = Field(min_length=1, max_length=128)
     input: dict[str, JsonValue] = Field(min_length=1)
-    rules: list[dict[str, JsonValue]] = Field(min_length=1, max_length=32)
+    rules: list[dict[str, JsonValue]] = Field(min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def safe_rules(self) -> EvaluationRegressionCaseRequest:
+        validate_rules(self.rules)
+        return self
 
 
 class EvaluationRegressionDatasetRequest(BaseModel):
@@ -86,7 +98,7 @@ class EvaluationRegressionDatasetRequest(BaseModel):
 
     dataset_id: str = Field(min_length=1, max_length=128)
     version: str = Field(min_length=1, max_length=64)
-    cases: list[EvaluationRegressionCaseRequest] = Field(min_length=1, max_length=100)
+    cases: list[EvaluationRegressionCaseRequest] = Field(min_length=1, max_length=10)
 
 
 class EvaluationRegressionTargetRequest(BaseModel):
@@ -98,7 +110,7 @@ class EvaluationRegressionTargetRequest(BaseModel):
 
 
 class EvaluationRegressionGatesRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     max_quality_regression_points: float = Field(default=0.0, ge=0)
     max_latency_regression_percent: float | None = Field(default=None, ge=0)

@@ -6,7 +6,9 @@ import socket
 
 import uvicorn
 
+from agent_runtime.execution.resource_executor import ResourceExecutor
 from agent_runtime.infrastructure.database.execution_service import ExecutionPersistenceService
+from agent_runtime.infrastructure.database.quotas import QuotaLimits
 from agent_runtime.infrastructure.database.session import (
     create_database_engine,
     create_session_factory,
@@ -89,17 +91,25 @@ async def _run_worker(settings: Settings) -> None:
         worker_id=socket.gethostname(),
         prefetch_count=settings.worker_concurrency,
         execution_service=ExecutionPersistenceService(
-            create_session_factory(engine), lease_seconds=settings.execution_lease_seconds
+            create_session_factory(engine),
+            lease_seconds=settings.execution_lease_seconds,
+            quotas=QuotaLimits.from_settings(settings),
+            max_attempts=settings.retry_max_attempts,
         ),
-        executor=ProviderRegistry(
-            [
-                DeterministicProvider(),
-                OpenAIResponsesProvider(
-                    api_key=settings.openai_api_key,
-                    base_url=str(settings.openai_base_url),
-                    default_model=settings.openai_default_model,
-                ),
-            ]
+        executor=ResourceExecutor(
+            ProviderRegistry(
+                [
+                    DeterministicProvider(),
+                    OpenAIResponsesProvider(
+                        api_key=settings.openai_api_key,
+                        base_url=str(settings.openai_base_url),
+                        default_model=settings.openai_default_model,
+                        timeout_seconds=settings.provider_timeout_seconds,
+                    ),
+                ]
+            ),
+            create_session_factory(engine),
+            settings,
         ),
     )
     try:

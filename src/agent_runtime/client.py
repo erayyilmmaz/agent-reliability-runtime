@@ -6,7 +6,8 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlencode
 
 import httpx
 
@@ -61,6 +62,12 @@ class ReplayRun:
     replay_of_run_id: uuid.UUID
     replayed: bool
     idempotency_key: str
+
+
+@dataclass(frozen=True)
+class HistoryPage:
+    items: list[dict[str, Any]]
+    next_cursor: str | None
 
 
 class AgentRuntimeClient:
@@ -138,12 +145,42 @@ class AgentRuntimeClient:
         )
 
     def get_attempts(self, run_id: uuid.UUID | str) -> list[dict[str, Any]]:
+        """Return the first 50 attempts; use get_history_page for continuation."""
         payload = self._request_list("GET", f"/v1/runs/{run_id}/attempts")
         return [dict(item) for item in payload]
 
     def get_events(self, run_id: uuid.UUID | str) -> list[dict[str, Any]]:
+        """Return the first 50 events; use get_history_page for continuation."""
         payload = self._request_list("GET", f"/v1/runs/{run_id}/events")
         return [dict(item) for item in payload]
+
+    def get_history_page(
+        self,
+        run_id: uuid.UUID | str,
+        *,
+        resource: Literal["attempts", "events", "evaluations"],
+        limit: int = 50,
+        cursor: uuid.UUID | str | None = None,
+    ) -> HistoryPage:
+        if resource not in {"attempts", "events", "evaluations"}:
+            raise ValueError("Unsupported history resource")
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        params = {"limit": str(limit)}
+        if cursor is not None:
+            params["cursor"] = str(uuid.UUID(str(cursor)))
+        response = self._send("GET", f"/v1/runs/{run_id}/{resource}?{urlencode(params)}")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AgentRuntimeTransportError("API response was not JSON") from exc
+        if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+            raise AgentRuntimeTransportError("API response was not an object list")
+        return HistoryPage(items=payload, next_cursor=response.headers.get("X-Next-Cursor"))
+
+    def get_job(self, job_id: uuid.UUID | str) -> dict[str, Any]:
+        """Read a durable evaluation/regression job, including its terminal result."""
+        return self._request("GET", f"/v1/jobs/{job_id}")
 
     def replay(self, run_id: uuid.UUID | str, *, idempotency_key: str | None = None) -> ReplayRun:
         key = idempotency_key or f"sdk-replay-{uuid.uuid4().hex}"

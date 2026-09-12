@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
 
+from agent_runtime.domain.policy import RunPolicyRequest
 from agent_runtime.domain.routing import resolve_routing_decision
 
 
@@ -17,6 +19,7 @@ class ExecutionErrorCode(StrEnum):
     PROVIDER_BAD_REQUEST = "PROVIDER_BAD_REQUEST"
     EXECUTION_ERROR = "EXECUTION_ERROR"
     EXECUTION_LEASE_EXPIRED = "EXECUTION_LEASE_EXPIRED"
+    RESOURCE_QUOTA_EXCEEDED = "RESOURCE_QUOTA_EXCEEDED"
 
 
 RETRYABLE_ERROR_CODES = frozenset(
@@ -42,8 +45,17 @@ class RetryPolicy:
     provider_order: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if self.max_attempts < 1:
-            raise ValueError("max_attempts must be at least 1")
+        if not 1 <= self.max_attempts <= 20:
+            raise ValueError("max_attempts must be between 1 and 20")
+        if not all(
+            math.isfinite(v)
+            for v in (
+                self.attempt_timeout_seconds,
+                self.initial_backoff_seconds,
+                self.max_backoff_seconds,
+            )
+        ):
+            raise ValueError("retry values must be finite")
         if self.attempt_timeout_seconds <= 0:
             raise ValueError("attempt_timeout_seconds must be greater than 0")
         if self.initial_backoff_seconds <= 0:
@@ -58,11 +70,14 @@ class RetryPolicy:
 
         if attempt_number < 1:
             raise ValueError("attempt_number must be at least 1")
-        return float(
-            min(
-                self.max_backoff_seconds,
-                self.initial_backoff_seconds * (2 ** (attempt_number - 1)),
-            )
+        return max(
+            1.0,
+            float(
+                min(
+                    self.max_backoff_seconds,
+                    self.initial_backoff_seconds * (2 ** min(attempt_number - 1, 20)),
+                )
+            ),
         )
 
     def as_snapshot(self) -> dict[str, Any]:
@@ -76,7 +91,7 @@ class RetryPolicy:
         ):
             raise ValueError("provider_order must be a list of strings")
         return cls(
-            max_attempts=_positive_int(value.get("max_attempts", 3), "max_attempts"),
+            max_attempts=min(20, _positive_int(value.get("max_attempts", 3), "max_attempts")),
             attempt_timeout_seconds=_positive_float(
                 value.get("attempt_timeout_seconds", 60), "attempt_timeout_seconds"
             ),
@@ -98,14 +113,33 @@ def build_policy_snapshot(
     initial_backoff_seconds: float,
     max_backoff_seconds: float,
     available_providers: set[str] | None = None,
+    max_output_tokens: int = 2048,
 ) -> dict[str, Any]:
     """Merge request policy with safe defaults before it is included in the idempotency hash."""
 
-    snapshot = dict(requested)
+    snapshot = RunPolicyRequest.model_validate(dict(requested)).model_dump(exclude_none=True)
+    if snapshot.get("max_backoff_seconds", max_backoff_seconds) < snapshot.get(
+        "initial_backoff_seconds", initial_backoff_seconds
+    ):
+        raise ValueError("max_backoff_seconds must be at least initial_backoff_seconds")
     snapshot.setdefault("max_attempts", max_attempts)
     snapshot.setdefault("attempt_timeout_seconds", attempt_timeout_seconds)
     snapshot.setdefault("initial_backoff_seconds", initial_backoff_seconds)
     snapshot.setdefault("max_backoff_seconds", max_backoff_seconds)
+    snapshot["max_attempts"] = min(snapshot["max_attempts"], max_attempts)
+    snapshot["attempt_timeout_seconds"] = min(
+        snapshot["attempt_timeout_seconds"], attempt_timeout_seconds
+    )
+    snapshot["initial_backoff_seconds"] = min(
+        max_backoff_seconds, max(1, initial_backoff_seconds, snapshot["initial_backoff_seconds"])
+    )
+    snapshot["max_backoff_seconds"] = max(
+        snapshot["initial_backoff_seconds"],
+        min(snapshot["max_backoff_seconds"], max_backoff_seconds),
+    )
+    snapshot["max_output_tokens"] = min(
+        snapshot.get("max_output_tokens", max_output_tokens), max_output_tokens
+    )
     routing_decision = resolve_routing_decision(snapshot, available_providers=available_providers)
     snapshot["provider_order"] = routing_decision["provider_order"]
     snapshot["routing"] = {
@@ -127,6 +161,10 @@ def is_retryable_error(error_code: str) -> bool:
 def classify_exception(exc: Exception) -> ExecutionErrorCode:
     """Map provider-facing failures to stable, policy-safe error codes."""
 
+    from agent_runtime.application.runs import QuotaExceededError
+
+    if isinstance(exc, QuotaExceededError):
+        return ExecutionErrorCode.RESOURCE_QUOTA_EXCEEDED
     if isinstance(exc, TimeoutError):
         return ExecutionErrorCode.PROVIDER_TIMEOUT
     status_code = getattr(exc, "status_code", None)
@@ -148,6 +186,11 @@ def _positive_int(value: Any, name: str) -> int:
 
 
 def _positive_float(value: Any, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
         raise ValueError(f"{name} must be a positive number")
     return float(value)

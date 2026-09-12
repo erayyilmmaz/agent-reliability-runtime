@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from datetime import UTC, datetime
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -15,13 +14,14 @@ from agent_runtime.application.runs import (
     EvaluationSnapshot,
     EventSnapshot,
     IdempotencyConflictError,
+    InvalidCursorError,
     RunNotFoundError,
     RunNotSucceededError,
     RunSnapshot,
     canonical_request_hash,
 )
 from agent_runtime.domain.states import EvaluationStatus, ExecutionStatus
-from agent_runtime.evaluation import EvaluationConfigurationError, evaluate_rules
+from agent_runtime.evaluation.safety import validate_rules
 from agent_runtime.infrastructure.database.models import (
     Evaluation,
     OutboxEvent,
@@ -29,6 +29,7 @@ from agent_runtime.infrastructure.database.models import (
     RunAttempt,
     RunEvent,
 )
+from agent_runtime.infrastructure.database.quotas import QuotaLimits, check_admission, lock_identity
 from agent_runtime.observability.metrics import get_runtime_metrics
 from agent_runtime.observability.telemetry import get_tracer, inject_trace_context
 
@@ -44,8 +45,16 @@ def _routing_decision(policy_snapshot: Mapping[str, Any]) -> dict[str, Any] | No
 class SqlAlchemyRunService:
     """Transactional run submission backed by PostgreSQL and the outbox table."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        quotas: QuotaLimits | None = None,
+        job_timeout_seconds: float = 60,
+    ) -> None:
         self._session_factory = session_factory
+        self._quotas = quotas or QuotaLimits()
+        self._job_timeout_seconds = job_timeout_seconds
 
     async def submit(
         self,
@@ -54,13 +63,22 @@ class SqlAlchemyRunService:
         idempotency_key: str,
         input_payload: dict[str, Any],
         policy_snapshot: dict[str, Any],
+        principal_id: str | None = None,
+        work_kind: str = "execution",
     ) -> tuple[RunSnapshot, bool]:
-        request_hash = canonical_request_hash(input_payload, policy_snapshot)
+        principal_id = principal_id or client_id
+        request_hash = canonical_request_hash(
+            input_payload,
+            policy_snapshot
+            if work_kind == "execution"
+            else {**policy_snapshot, "work_kind": work_kind},
+        )
 
         with get_tracer().start_as_current_span("arr.db.run.submit") as span:
             async with self._session_factory() as session:
                 try:
                     async with session.begin():
+                        await lock_identity(session, principal_id, client_id)
                         existing = await self._find_by_idempotency_key(
                             session, client_id=client_id, idempotency_key=idempotency_key
                         )
@@ -71,8 +89,11 @@ class SqlAlchemyRunService:
                                 existing, request_hash
                             )
 
+                        await check_admission(session, principal_id, client_id, self._quotas)
                         trace_context = inject_trace_context()
                         run = Run(
+                            principal_id=principal_id,
+                            work_kind=work_kind,
                             client_id=client_id,
                             idempotency_key=idempotency_key,
                             request_hash=request_hash,
@@ -137,136 +158,181 @@ class SqlAlchemyRunService:
             run = await self._get_run_for_client(session, client_id=client_id, run_id=run_id)
             return self._to_run_snapshot(run)
 
-    async def get_attempts(self, *, client_id: str, run_id: UUID) -> list[AttemptSnapshot]:
+    async def get_attempts(
+        self, *, client_id: str, run_id: UUID, limit: int = 50, cursor: UUID | None = None
+    ) -> list[AttemptSnapshot]:
         async with self._session_factory() as session:
             await self._get_run_for_client(session, client_id=client_id, run_id=run_id)
-            attempts = await session.scalars(
-                select(RunAttempt)
-                .where(RunAttempt.run_id == run_id)
-                .order_by(RunAttempt.attempt_number.asc())
+            statement = select(RunAttempt).where(RunAttempt.run_id == run_id)
+            if cursor is not None:
+                anchor = await session.scalar(
+                    select(RunAttempt).where(RunAttempt.id == cursor, RunAttempt.run_id == run_id)
+                )
+                if anchor is None:
+                    raise InvalidCursorError("Cursor does not belong to this history")
+                statement = statement.where(
+                    tuple_(RunAttempt.started_at, RunAttempt.id) > (anchor.started_at, anchor.id)
+                )
+            rows = await session.scalars(
+                statement.order_by(RunAttempt.started_at, RunAttempt.id).limit(
+                    max(1, min(limit, 100))
+                )
             )
-            return [self._to_attempt_snapshot(attempt) for attempt in attempts]
+            return [self._to_attempt_snapshot(row) for row in rows]
 
-    async def get_events(self, *, client_id: str, run_id: UUID) -> list[EventSnapshot]:
+    async def get_events(
+        self, *, client_id: str, run_id: UUID, limit: int = 50, cursor: UUID | None = None
+    ) -> list[EventSnapshot]:
         async with self._session_factory() as session:
             await self._get_run_for_client(session, client_id=client_id, run_id=run_id)
-            events = await session.scalars(
-                select(RunEvent)
-                .where(RunEvent.run_id == run_id)
-                .order_by(RunEvent.created_at.asc())
+            statement = select(RunEvent).where(RunEvent.run_id == run_id)
+            if cursor is not None:
+                anchor = await session.scalar(
+                    select(RunEvent).where(RunEvent.id == cursor, RunEvent.run_id == run_id)
+                )
+                if anchor is None:
+                    raise InvalidCursorError("Cursor does not belong to this history")
+                statement = statement.where(
+                    tuple_(RunEvent.created_at, RunEvent.id) > (anchor.created_at, anchor.id)
+                )
+            rows = await session.scalars(
+                statement.order_by(RunEvent.created_at, RunEvent.id).limit(max(1, min(limit, 100)))
             )
-            return [self._to_event_snapshot(event) for event in events]
+            return [self._to_event_snapshot(row) for row in rows]
 
     async def evaluate(
-        self, *, client_id: str, run_id: UUID, rules: list[dict[str, Any]]
+        self,
+        *,
+        client_id: str,
+        run_id: UUID,
+        rules: list[dict[str, Any]],
+        principal_id: str | None = None,
     ) -> EvaluationSnapshot:
-        """Persist evaluation lifecycle separately from the completed execution."""
-
+        """Accept evaluation as a durable worker job in the same outbox transaction."""
+        validate_rules(rules)
+        principal_id = principal_id or client_id
         async with self._session_factory() as session:
             async with session.begin():
+                await lock_identity(session, principal_id, client_id)
                 run = await self._get_run_for_client(session, client_id=client_id, run_id=run_id)
-                if run.execution_status != ExecutionStatus.SUCCEEDED or run.result_payload is None:
-                    raise RunNotSucceededError(
-                        "Only a SUCCEEDED run with a persisted result can be evaluated"
-                    )
-                successful_attempt = cast(
-                    RunAttempt | None,
-                    await session.scalar(
-                        select(RunAttempt)
-                        .where(RunAttempt.run_id == run.id, RunAttempt.outcome == "SUCCEEDED")
-                        .order_by(RunAttempt.attempt_number.desc())
-                        .limit(1)
-                    ),
+                await session.refresh(run, with_for_update=True)
+                if (
+                    run.work_kind != "execution"
+                    or run.execution_status != ExecutionStatus.SUCCEEDED
+                    or run.result_payload is None
+                ):
+                    raise RunNotSucceededError("Only a successful execution run can be evaluated")
+                await check_admission(session, principal_id, client_id, self._quotas)
+                trace_context = inject_trace_context()
+                job = Run(
+                    client_id=client_id,
+                    principal_id=principal_id,
+                    work_kind="evaluation",
+                    idempotency_key=f"evaluation-{uuid4()}",
+                    request_hash=canonical_request_hash({"source": str(run_id)}, {"rules": rules}),
+                    input_payload={"source_run_id": str(run_id), "rules": rules},
+                    policy_snapshot=self.job_policy(),
+                    trace_context=trace_context,
+                    execution_status=ExecutionStatus.QUEUED,
+                    evaluation_status=EvaluationStatus.NOT_RUN,
                 )
+                session.add(job)
+                await session.flush()
                 evaluation = Evaluation(
                     run_id=run.id,
+                    job_run_id=job.id,
                     evaluator="deterministic_rules",
                     status=EvaluationStatus.PENDING,
-                    details={"rule_count": len(rules)},
+                    details={"rule_count": len(rules), "job_run_id": str(job.id)},
                 )
                 run.evaluation_status = EvaluationStatus.PENDING
-                session.add(evaluation)
-                session.add(
-                    RunEvent(
-                        run_id=run.id,
-                        attempt_id=(
-                            successful_attempt.id if successful_attempt is not None else None
+                session.add_all(
+                    [
+                        evaluation,
+                        OutboxEvent(
+                            aggregate_id=job.id,
+                            event_type="RUN_QUEUED",
+                            payload={"trace_context": trace_context},
                         ),
-                        event_type="EVALUATION_PENDING",
-                        metadata_={"evaluator": evaluation.evaluator, "rule_count": len(rules)},
-                    )
+                        RunEvent(
+                            run_id=job.id,
+                            event_type="RUN_QUEUED",
+                            metadata_={"work_kind": "evaluation"},
+                        ),
+                        RunEvent(
+                            run_id=run.id,
+                            event_type="EVALUATION_PENDING",
+                            metadata_={"job_run_id": str(job.id)},
+                        ),
+                    ]
                 )
                 await session.flush()
-                evaluation_id = evaluation.id
-                result_payload = deepcopy(run.result_payload)
-                latency_ms = (
-                    successful_attempt.latency_ms if successful_attempt is not None else None
-                )
+                return self._to_evaluation_snapshot(evaluation)
 
-        try:
-            outcome = evaluate_rules(
-                rules=rules, result_payload=result_payload, latency_ms=latency_ms
-            )
-            evaluation_status = (
-                EvaluationStatus.PASSED if outcome.passed else EvaluationStatus.FAILED
-            )
-            result = outcome.as_persisted_result()
-            details: dict[str, Any] = {"rule_count": len(rules)}
-        except EvaluationConfigurationError:
-            evaluation_status = EvaluationStatus.ERROR
-            result = None
-            details = {"error_code": "INVALID_EVALUATION_RULE"}
-        except Exception:
-            evaluation_status = EvaluationStatus.ERROR
-            result = None
-            details = {"error_code": "EVALUATION_ERROR"}
+    def job_policy(self) -> dict[str, Any]:
+        return {
+            "max_attempts": 1,
+            "attempt_timeout_seconds": self._job_timeout_seconds,
+            "initial_backoff_seconds": 1,
+            "max_backoff_seconds": 1,
+            "provider_order": ["deterministic"],
+        }
 
-        now = datetime.now(UTC)
-        async with self._session_factory() as session:
-            async with session.begin():
-                run = await self._get_run_for_client(session, client_id=client_id, run_id=run_id)
-                persisted_evaluation = await session.get(
-                    Evaluation, evaluation_id, with_for_update=True
-                )
-                if persisted_evaluation is None or persisted_evaluation.run_id != run.id:
-                    raise RuntimeError("Evaluation lifecycle record was not persisted")
-                persisted_evaluation.status = evaluation_status
-                persisted_evaluation.result = result
-                persisted_evaluation.details = details
-                persisted_evaluation.completed_at = now
-                run.evaluation_status = evaluation_status
-                session.add(
-                    RunEvent(
-                        run_id=run.id,
-                        event_type=f"EVALUATION_{evaluation_status}",
-                        metadata_={"evaluator": persisted_evaluation.evaluator, **details},
-                    )
-                )
-                await session.flush()
-                return self._to_evaluation_snapshot(persisted_evaluation)
+    async def submit_regression(
+        self,
+        *,
+        client_id: str,
+        principal_id: str,
+        payload: dict[str, Any],
+        idempotency_key: str,
+    ) -> tuple[RunSnapshot, bool]:
+        return await self.submit(
+            client_id=client_id,
+            principal_id=principal_id,
+            input_payload=payload,
+            policy_snapshot=self.job_policy(),
+            idempotency_key=idempotency_key,
+            work_kind="regression",
+        )
 
-    async def get_evaluations(self, *, client_id: str, run_id: UUID) -> list[EvaluationSnapshot]:
+    async def get_evaluations(
+        self, *, client_id: str, run_id: UUID, limit: int = 50, cursor: UUID | None = None
+    ) -> list[EvaluationSnapshot]:
         async with self._session_factory() as session:
             await self._get_run_for_client(session, client_id=client_id, run_id=run_id)
-            evaluations = await session.scalars(
-                select(Evaluation)
-                .where(Evaluation.run_id == run_id)
-                .order_by(Evaluation.created_at.asc())
+            statement = select(Evaluation).where(Evaluation.run_id == run_id)
+            if cursor is not None:
+                anchor = await session.scalar(
+                    select(Evaluation).where(Evaluation.id == cursor, Evaluation.run_id == run_id)
+                )
+                if anchor is None:
+                    raise InvalidCursorError("Cursor does not belong to this history")
+                statement = statement.where(
+                    tuple_(Evaluation.created_at, Evaluation.id) > (anchor.created_at, anchor.id)
+                )
+            rows = await session.scalars(
+                statement.order_by(Evaluation.created_at, Evaluation.id).limit(
+                    max(1, min(limit, 100))
+                )
             )
-            return [self._to_evaluation_snapshot(evaluation) for evaluation in evaluations]
+            return [self._to_evaluation_snapshot(row) for row in rows]
 
     async def replay(
-        self, *, client_id: str, run_id: UUID, idempotency_key: str
+        self, *, client_id: str, run_id: UUID, idempotency_key: str, principal_id: str | None = None
     ) -> tuple[RunSnapshot, bool]:
         """Create a distinct durable run from an immutable source snapshot."""
 
+        principal_id = principal_id or client_id
         with get_tracer().start_as_current_span("arr.db.run.replay") as span:
             async with self._session_factory() as session:
                 try:
                     async with session.begin():
+                        await lock_identity(session, principal_id, client_id)
                         source = await self._get_run_for_client(
                             session, client_id=client_id, run_id=run_id
                         )
+                        if source.work_kind != "execution":
+                            raise RunNotFoundError("Only execution runs can be replayed")
                         request_hash = canonical_request_hash(
                             {"replay_of_run_id": str(source.id), "input": source.input_payload},
                             source.policy_snapshot,
@@ -279,8 +345,10 @@ class SqlAlchemyRunService:
                                 existing, request_hash=request_hash, source_run_id=source.id
                             )
 
+                        await check_admission(session, principal_id, client_id, self._quotas)
                         trace_context = inject_trace_context()
                         replay = Run(
+                            principal_id=principal_id,
                             client_id=client_id,
                             idempotency_key=idempotency_key,
                             request_hash=request_hash,
@@ -395,6 +463,8 @@ class SqlAlchemyRunService:
             replay_of_run_id=run.replay_of_run_id,
             error_code=run.error_code,
             routing_decision=_routing_decision(run.policy_snapshot),
+            work_kind=run.work_kind,
+            result_payload=run.result_payload,
         )
 
     @staticmethod

@@ -33,6 +33,8 @@ class RunSnapshot:
     replay_of_run_id: uuid.UUID | None
     error_code: str | None
     routing_decision: dict[str, Any] | None = None
+    work_kind: str = "execution"
+    result_payload: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,14 @@ class RunNotFoundError(LookupError):
     """A requested run does not exist in the caller's visible scope."""
 
 
+class InvalidCursorError(ValueError):
+    pass
+
+
+class QuotaExceededError(ValueError):
+    pass
+
+
 class IdempotencyConflictError(ValueError):
     """The same key was reused for a semantically different request."""
 
@@ -89,22 +99,41 @@ class RunSubmissionService(Protocol):
         idempotency_key: str,
         input_payload: dict[str, Any],
         policy_snapshot: dict[str, Any],
+        principal_id: str | None = None,
     ) -> tuple[RunSnapshot, bool]: ...
 
     async def get_run(self, *, client_id: str, run_id: uuid.UUID) -> RunSnapshot: ...
 
-    async def get_attempts(self, *, client_id: str, run_id: uuid.UUID) -> list[AttemptSnapshot]: ...
+    async def get_attempts(
+        self, *, client_id: str, run_id: uuid.UUID, limit: int = 50, cursor: uuid.UUID | None = None
+    ) -> list[AttemptSnapshot]: ...
 
-    async def get_events(self, *, client_id: str, run_id: uuid.UUID) -> list[EventSnapshot]: ...
+    async def get_events(
+        self, *, client_id: str, run_id: uuid.UUID, limit: int = 50, cursor: uuid.UUID | None = None
+    ) -> list[EventSnapshot]: ...
 
     async def evaluate(
-        self, *, client_id: str, run_id: uuid.UUID, rules: list[dict[str, Any]]
+        self,
+        *,
+        client_id: str,
+        run_id: uuid.UUID,
+        rules: list[dict[str, Any]],
+        principal_id: str | None = None,
     ) -> EvaluationSnapshot: ...
 
     async def get_evaluations(
-        self, *, client_id: str, run_id: uuid.UUID
+        self, *, client_id: str, run_id: uuid.UUID, limit: int = 50, cursor: uuid.UUID | None = None
     ) -> list[EvaluationSnapshot]: ...
 
     async def replay(
-        self, *, client_id: str, run_id: uuid.UUID, idempotency_key: str
+        self,
+        *,
+        client_id: str,
+        run_id: uuid.UUID,
+        idempotency_key: str,
+        principal_id: str | None = None,
+    ) -> tuple[RunSnapshot, bool]: ...
+
+    async def submit_regression(
+        self, *, client_id: str, principal_id: str, payload: dict[str, Any], idempotency_key: str
     ) -> tuple[RunSnapshot, bool]: ...

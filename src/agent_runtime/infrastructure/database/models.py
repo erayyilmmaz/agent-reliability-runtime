@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -35,6 +36,11 @@ class Run(Base):
     __table_args__ = (
         UniqueConstraint("client_id", "idempotency_key", name="uq_runs_client_idempotency_key"),
         CheckConstraint(
+            "work_kind IN ('execution', 'evaluation', 'regression')", name="ck_runs_work_kind"
+        ),
+        Index("ix_runs_principal_active", "principal_id", "execution_status"),
+        Index("ix_runs_tenant_active", "client_id", "execution_status"),
+        CheckConstraint(
             "execution_status IN ('QUEUED', 'RUNNING', 'RETRY_SCHEDULED', "
             "'SUCCEEDED', 'FAILED', 'DEAD_LETTERED')",
             name="ck_runs_execution_status",
@@ -47,6 +53,10 @@ class Run(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     client_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    principal_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    work_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="execution", server_default="execution"
+    )
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     input_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -85,7 +95,9 @@ class Run(Base):
     replays: Mapped[list[Run]] = relationship(back_populates="replay_of")
     attempts: Mapped[list[RunAttempt]] = relationship(back_populates="run")
     events: Mapped[list[RunEvent]] = relationship(back_populates="run")
-    evaluations: Mapped[list[Evaluation]] = relationship(back_populates="run")
+    evaluations: Mapped[list[Evaluation]] = relationship(
+        back_populates="run", foreign_keys="Evaluation.run_id"
+    )
 
     __mapper_args__ = {"version_id_col": version}
 
@@ -96,6 +108,7 @@ class RunAttempt(Base):
     __tablename__ = "run_attempts"
     __table_args__ = (
         UniqueConstraint("run_id", "attempt_number", name="uq_run_attempts_run_number"),
+        Index("ix_run_attempts_page", "run_id", "started_at", "id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -123,6 +136,7 @@ class RunEvent(Base):
     """Append-only execution facts; database triggers reject updates and deletes."""
 
     __tablename__ = "run_events"
+    __table_args__ = (Index("ix_run_events_page", "run_id", "created_at", "id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id: Mapped[uuid.UUID] = mapped_column(
@@ -166,6 +180,8 @@ class Evaluation(Base):
 
     __tablename__ = "evaluations"
     __table_args__ = (
+        Index("ix_evaluations_page", "run_id", "created_at", "id"),
+        UniqueConstraint("job_run_id", name="uq_evaluations_job_run"),
         CheckConstraint(
             "status IN ('NOT_RUN', 'PENDING', 'PASSED', 'FAILED', 'ERROR')",
             name="ck_evaluations_status",
@@ -177,6 +193,11 @@ class Evaluation(Base):
         Uuid(as_uuid=True), ForeignKey("runs.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     evaluator: Mapped[str] = mapped_column(String(128), nullable=False)
+    job_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("runs.id", ondelete="RESTRICT", name="fk_evaluations_job_run"),
+        nullable=True,
+    )
     status: Mapped[EvaluationStatus] = mapped_column(
         SqlEnum(EvaluationStatus, native_enum=False, create_constraint=False, length=32),
         nullable=False,
@@ -189,7 +210,15 @@ class Evaluation(Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    run: Mapped[Run] = relationship(back_populates="evaluations")
+    run: Mapped[Run] = relationship(back_populates="evaluations", foreign_keys=[run_id])
+
+
+class ProviderQuota(Base):
+    __tablename__ = "provider_quotas"
+    __table_args__ = (CheckConstraint("used >= 0", name="ck_provider_quota_used"),)
+    scope: Mapped[str] = mapped_column(String(160), primary_key=True)
+    window_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    used: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class SecurityAuditEvent(Base):

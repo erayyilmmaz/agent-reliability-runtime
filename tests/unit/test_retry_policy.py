@@ -53,7 +53,7 @@ def test_policy_snapshot_contains_resolved_defaults() -> None:
         max_backoff_seconds=60,
     )
 
-    assert snapshot["max_attempts"] == 4
+    assert snapshot["max_attempts"] == 3
     assert snapshot["attempt_timeout_seconds"] == 30.0
     assert snapshot["initial_backoff_seconds"] == 2.0
     assert snapshot["max_backoff_seconds"] == 60.0

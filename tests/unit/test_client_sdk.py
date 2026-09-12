@@ -99,3 +99,23 @@ def test_client_raises_controlled_api_error() -> None:
 
     assert captured.value.status_code == 409
     assert captured.value.code == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_client_exposes_history_cursor_and_job_result() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/v1/jobs/"):
+            return httpx.Response(
+                200, json={"execution_status": "SUCCEEDED", "result": {"passed": True}}
+            )
+        assert request.url.params["limit"] == "10"
+        assert request.url.params["cursor"] == str(RUN_ID)
+        return httpx.Response(
+            200, json=[{"event_id": str(REPLAY_ID)}], headers={"X-Next-Cursor": str(REPLAY_ID)}
+        )
+
+    client = _client(handler)
+    page = client.get_history_page(RUN_ID, resource="events", limit=10, cursor=RUN_ID)
+    assert page.items == [{"event_id": str(REPLAY_ID)}] and page.next_cursor == str(REPLAY_ID)
+    assert client.get_job(RUN_ID)["result"]["passed"]
+    with pytest.raises(ValueError):
+        client.get_history_page(RUN_ID, resource="events", limit=101)

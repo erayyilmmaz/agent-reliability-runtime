@@ -94,7 +94,7 @@ def test_real_database_tenant_isolation_and_safe_audit() -> None:
         )
         assert (
             client.post(f"/v1/runs/{run_id}/evaluations", headers=owner, json=rules).status_code
-            == 200
+            == 202
         )
         assert client.post(f"/v1/runs/{run_id}/replay", headers=attacker).status_code == 404
         assert (

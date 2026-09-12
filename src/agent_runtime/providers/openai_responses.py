@@ -21,12 +21,14 @@ class OpenAIResponsesProvider:
         api_key: SecretStr | None,
         base_url: str,
         default_model: str,
+        timeout_seconds: float = 60,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._default_model = default_model
         self._transport = transport
+        self._timeout_seconds = timeout_seconds
 
     async def execute(
         self, *, input_payload: dict[str, Any], policy_snapshot: dict[str, Any]
@@ -38,11 +40,15 @@ class OpenAIResponsesProvider:
             "Authorization": f"Bearer {self._api_key.get_secret_value()}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(transport=self._transport) as client:
+        async with httpx.AsyncClient(
+            transport=self._transport, timeout=httpx.Timeout(self._timeout_seconds)
+        ) as client:
             try:
                 response = await client.post(
                     f"{self._base_url}/responses", headers=headers, json=body
                 )
+            except httpx.TimeoutException as exc:
+                raise TimeoutError("OpenAI request timed out") from exc
             except httpx.RequestError as exc:
                 raise RuntimeError("OpenAI request did not receive a response") from exc
         if response.is_error:

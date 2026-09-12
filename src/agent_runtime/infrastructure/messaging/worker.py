@@ -134,7 +134,12 @@ class RabbitMqWorker:
                 self._executor.execute(
                     provider=claim.provider,
                     input_payload=claim.input_payload,
-                    policy_snapshot=claim.policy_snapshot,
+                    policy_snapshot={
+                        **claim.policy_snapshot,
+                        "_runtime_run_id": str(claim.run_id),
+                        "_runtime_worker_id": self._worker_id,
+                        "_runtime_attempt_id": str(claim.attempt_id),
+                    },
                 ),
                 timeout=retry_policy.attempt_timeout_seconds,
             )

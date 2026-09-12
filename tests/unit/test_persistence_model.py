@@ -9,6 +9,7 @@ def test_metadata_contains_every_durable_runtime_entity() -> None:
         "outbox_events",
         "evaluations",
         "security_audit_events",
+        "provider_quotas",
     }
 
 

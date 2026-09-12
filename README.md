@@ -238,11 +238,14 @@ fields cannot reach logs. OTLP instrumentation never captures HTTP bodies or hea
 
 ## Evaluation and replay
 
-`POST /v1/runs/{run_id}/evaluations` evaluates only a `SUCCEEDED` run's persisted
-result. The request contains an ordered `rules` list; V0 supports `non_empty`,
-`json_schema`, `latency_budget`, and generic `rule` (`exists`, `equals`,
-`not_equals`, `contains`, or `matches`) checks. Results are deterministic,
-stored in the `evaluations` lifecycle record, and available from
+`POST /v1/runs/{run_id}/evaluations` accepts evaluation of a `SUCCEEDED` run's
+persisted result and returns **202 / PENDING**, not a completed evaluation.
+`details.job_run_id` identifies durable outbox/worker work; poll
+`GET /v1/jobs/{job_run_id}` for completion. The request contains at most 16
+ordered rules: `non_empty`, restricted `json_schema`, `latency_budget`, or generic
+`rule` (`exists`, `equals`, `not_equals`, `contains`). Regex `matches` and unsafe
+schema constructs are rejected. Results are deterministic, stored in the
+`evaluations` lifecycle record, and available from
 `GET /v1/runs/{run_id}/evaluations`. An evaluation may be `FAILED` or `ERROR`
 without changing the run's execution result.
 
@@ -260,6 +263,21 @@ to compare a baseline and candidate provider/model on the same deterministic
 rules. It emits a machine-readable report with independent quality, latency,
 and estimated-cost deltas and can be triggered by CLI or
 `POST /v1/evaluation-regressions`.
+
+The regression API requires an authenticated credential and `Idempotency-Key`,
+including when the rest of the API runs in anonymous local mode (where this
+endpoint returns `401`). It returns a durable `202` job receipt; read the final
+report from `GET /v1/jobs/{job_id}`. Defaults allow 10 cases and 20 provider calls
+per job. The operator CLI remains synchronous and is not an untrusted API boundary.
+
+## Resource controls
+
+See [SEC-E2 resource limits and upgrade contract](docs/security/resource-controls.md)
+for policy bounds, per-principal/tenant quotas, safe rules, and the migration.
+History endpoints (`/attempts`, `/events`, `/evaluations`) now return at most
+50 records by default; use `limit=1..100` and the `X-Next-Cursor` response header
+as the next request's `cursor`. SDK callers can use `get_history_page()`;
+`get_attempts()` and `get_events()` return only the first page.
 
 ## API security boundary
 

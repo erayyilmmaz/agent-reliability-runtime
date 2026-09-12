@@ -1,7 +1,6 @@
 """Evaluation engine; ARR-10 introduces deterministic evaluators."""
 
 from agent_runtime.evaluation.engine import (
-    EvaluationConfigurationError,
     EvaluationOutcome,
     evaluate_rules,
 )
@@ -11,6 +10,7 @@ from agent_runtime.evaluation.regression import (
     RegressionDataset,
     RegressionGates,
 )
+from agent_runtime.evaluation.safety import EvaluationConfigurationError
 
 __all__ = [
     "EvaluationConfigurationError",

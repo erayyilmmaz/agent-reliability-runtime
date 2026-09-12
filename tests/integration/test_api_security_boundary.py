@@ -51,6 +51,7 @@ class CountingRunService:
         idempotency_key: str,
         input_payload: dict[str, Any],
         policy_snapshot: dict[str, Any],
+        principal_id: str | None = None,
     ) -> tuple[RunSnapshot, bool]:
         del client_id, idempotency_key, input_payload, policy_snapshot
         self.submission_count += 1

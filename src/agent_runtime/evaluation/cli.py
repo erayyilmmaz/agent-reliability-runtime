@@ -92,6 +92,7 @@ def _provider_registry(settings: Settings) -> ProviderRegistry:
                 api_key=settings.openai_api_key,
                 base_url=str(settings.openai_base_url),
                 default_model=settings.openai_default_model,
+                timeout_seconds=settings.provider_timeout_seconds,
             ),
         ]
     )

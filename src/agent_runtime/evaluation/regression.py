@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agent_runtime.application.execution import ExecutionResult
+from agent_runtime.application.runs import QuotaExceededError
 from agent_runtime.evaluation.engine import evaluate_rules
 
 REPORT_SCHEMA_VERSION = "evaluation-regression-report.v1"
@@ -135,6 +136,12 @@ class EvaluationRegressionRunner:
         baseline_result = await self._run_target(dataset, baseline)
         candidate_result = await self._run_target(dataset, candidate)
         comparison = _comparison(baseline_result, candidate_result, gates)
+        if any(
+            "error_type" in case
+            for result in (baseline_result, candidate_result)
+            for case in result["cases"]
+        ):
+            comparison["passed"] = False
         return {
             "schema_version": REPORT_SCHEMA_VERSION,
             "dataset": {
@@ -175,6 +182,8 @@ class EvaluationRegressionRunner:
                         "rules": outcome.rule_results,
                     }
                 )
+            except QuotaExceededError:
+                raise
             except Exception as exc:
                 latency_ms = round((time.perf_counter() - started_at) * 1000)
                 case_results.append(

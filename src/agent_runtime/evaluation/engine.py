@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError, ValidationError
+from jsonschema.exceptions import ValidationError
 
-
-class EvaluationConfigurationError(ValueError):
-    """A caller supplied an invalid deterministic evaluation rule."""
+from agent_runtime.evaluation.safety import (
+    EvaluationConfigurationError,
+    bounded_value,
+    validate_rules,
+)
 
 
 @dataclass(frozen=True)
@@ -28,8 +29,8 @@ def evaluate_rules(
 ) -> EvaluationOutcome:
     """Apply configured checks without retaining a provider response in the result."""
 
-    if not rules:
-        raise EvaluationConfigurationError("at least one evaluation rule is required")
+    validate_rules(rules)
+    bounded_value(result_payload)
 
     results = [
         _evaluate_rule(rule, result_payload=result_payload, latency_ms=latency_ms) for rule in rules
@@ -63,10 +64,8 @@ def _evaluate_rule(
             return _rule_result(kind, path, False, "path was not found")
         try:
             Draft202012Validator(schema).validate(value)
-        except SchemaError as exc:
-            raise EvaluationConfigurationError("json_schema rule has an invalid schema") from exc
-        except ValidationError as exc:
-            return _rule_result(kind, path, False, f"schema validation failed: {exc.message}")
+        except ValidationError:
+            return _rule_result(kind, path, False, "schema validation failed")
         return _rule_result(kind, path, True, "schema validation passed")
 
     if kind == "latency_budget":
@@ -81,9 +80,9 @@ def _evaluate_rule(
 
     if kind == "rule":
         operator = rule.get("operator")
-        if operator not in {"exists", "equals", "not_equals", "contains", "matches"}:
+        if operator not in {"exists", "equals", "not_equals", "contains"}:
             raise EvaluationConfigurationError(
-                "rule evaluator operator must be exists, equals, not_equals, contains, or matches"
+                "rule evaluator operator must be exists, equals, not_equals, or contains"
             )
         value, found = _value_at_path(result_payload, path)
         expected = rule.get("value")
@@ -93,17 +92,15 @@ def _evaluate_rule(
             passed = found and value == expected
         elif operator == "not_equals":
             passed = found and value != expected
-        elif operator == "contains":
-            passed = found and isinstance(value, (str, list, dict)) and expected in value
         else:
-            if not isinstance(expected, str):
-                raise EvaluationConfigurationError("matches rule requires a string value")
-            try:
-                passed = found and isinstance(value, str) and re.search(expected, value) is not None
-            except re.error as exc:
-                raise EvaluationConfigurationError(
-                    "matches rule contains an invalid regex"
-                ) from exc
+            passed = found and (
+                (isinstance(value, list) and expected in value)
+                or (
+                    isinstance(value, (str, dict))
+                    and isinstance(expected, str)
+                    and expected in value
+                )
+            )
         return _rule_result(
             kind, path, passed, f"{operator} check {'passed' if passed else 'failed'}"
         )
@@ -118,7 +115,12 @@ def _value_at_path(payload: Any, path: str) -> tuple[Any, bool]:
     for part in path.split("."):
         if isinstance(value, dict) and part in value:
             value = value[part]
-        elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
+        elif (
+            isinstance(value, list)
+            and len(part) <= 10
+            and part.isdigit()
+            and int(part) < len(value)
+        ):
             value = value[int(part)]
         else:
             return None, False

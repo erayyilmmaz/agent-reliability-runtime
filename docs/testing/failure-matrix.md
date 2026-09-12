@@ -17,6 +17,11 @@ that hosted CI, production deployment, or customer UAT has passed.
 | Evaluation regression | Evaluation may be `FAILED` or `ERROR` while execution stays `SUCCEEDED` | Compose smoke, evaluation engine, API contract, and regression fixture tests |
 | Immutable replay | New queued run has `replay_of_run_id`; repeat is idempotent | Compose smoke and `test_replay_creates_a_new_run_and_is_idempotent` |
 | Invalid credentials / abuse | 401/403/429 precede run persistence and provider execution | `test_api_security_boundary.py` |
+| Hostile evaluation configuration and body | Unsafe rules, unknown policy fields and oversized actual streams are rejected before work | `test_resource_controls.py` |
+| Durable evaluation / regression | HTTP accepts a job; worker completion or lease expiry finalizes its result, duplicate delivery does not execute twice | `test_resource_controls_live.py`, Compose smoke (evaluation) |
+| Tenant resource saturation | Concurrent admissions, running leases and provider calls stay within shared limits | Real PostgreSQL race tests in `test_resource_controls_live.py` |
+| Large run histories | Bounded cursor pages are complete, non-duplicating and tenant scoped | Real PostgreSQL history test and SDK cursor test |
+| Configured provider timeout | A 1.2-second real HTTP response times out with setting 1, succeeds with setting 2 | `test_real_http_timeout_changes_with_configuration` |
 
 ## Running the evidence
 

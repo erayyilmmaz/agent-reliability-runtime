@@ -8,12 +8,13 @@ from functools import partial
 from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import FastAPI, Header, Request, status
+from fastapi import FastAPI, Header, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.concurrency import run_in_threadpool
 
+from agent_runtime.api.body_limit import BodyLimitMiddleware
 from agent_runtime.api.schemas import (
     ApiErrorResponse,
     AttemptResponse,
@@ -31,6 +32,7 @@ from agent_runtime.application.runs import (
     EvaluationSnapshot,
     EventSnapshot,
     IdempotencyConflictError,
+    InvalidCursorError,
     RunNotFoundError,
     RunNotSucceededError,
     RunSnapshot,
@@ -38,11 +40,10 @@ from agent_runtime.application.runs import (
 )
 from agent_runtime.domain.retry import build_policy_snapshot
 from agent_runtime.evaluation.regression import (
-    EvaluationRegressionRunner,
     ProviderModelTarget,
     RegressionDataset,
-    RegressionGates,
 )
+from agent_runtime.infrastructure.database.quotas import QuotaExceededError, QuotaLimits
 from agent_runtime.infrastructure.database.run_service import SqlAlchemyRunService
 from agent_runtime.infrastructure.database.session import (
     create_database_engine,
@@ -55,9 +56,6 @@ from agent_runtime.infrastructure.redis.rate_limiter import (
     RedisFixedWindowRateLimiter,
 )
 from agent_runtime.observability.telemetry import extract_trace_context, get_tracer
-from agent_runtime.providers.deterministic import DeterministicProvider
-from agent_runtime.providers.openai_responses import OpenAIResponsesProvider
-from agent_runtime.providers.registry import ProviderRegistry
 from agent_runtime.security import (
     NoopSecurityAuditSink,
     SecurityAuditRecord,
@@ -144,21 +142,6 @@ def _get_service(request: Request) -> RunSubmissionService:
     return cast(RunSubmissionService, request.app.state.run_service)
 
 
-def _regression_runner(settings: Settings) -> EvaluationRegressionRunner:
-    return EvaluationRegressionRunner(
-        ProviderRegistry(
-            [
-                DeterministicProvider(),
-                OpenAIResponsesProvider(
-                    api_key=settings.openai_api_key,
-                    base_url=str(settings.openai_base_url),
-                    default_model=settings.openai_default_model,
-                ),
-            ]
-        )
-    )
-
-
 def _validate_regression_targets(settings: Settings, *targets: ProviderModelTarget) -> None:
     for target in targets:
         if target.provider not in {"deterministic", "openai"}:
@@ -181,7 +164,14 @@ def create_app(
     if run_service is None:
         engine = create_database_engine(runtime_settings)
         session_factory = create_session_factory(engine)
-        run_service = SqlAlchemyRunService(session_factory)
+        run_service = SqlAlchemyRunService(
+            session_factory,
+            quotas=QuotaLimits.from_settings(runtime_settings),
+            job_timeout_seconds=min(
+                runtime_settings.retry_attempt_timeout_seconds,
+                runtime_settings.execution_lease_seconds - 1,
+            ),
+        )
         audit_sink = audit_sink or SqlAlchemySecurityAuditSink(session_factory)
     else:
         audit_sink = audit_sink or NoopSecurityAuditSink()
@@ -260,26 +250,6 @@ def create_app(
             )
         # Never persist unauthenticated identity assertions in audit records.
         client_id = None
-        content_length = request.headers.get("content-length")
-        if content_length is not None:
-            try:
-                is_oversized = int(content_length) > runtime_settings.max_request_bytes
-            except ValueError:
-                is_oversized = False
-            if is_oversized:
-                await write_security_audit(
-                    event_type="REQUEST_REJECTED",
-                    outcome="DENIED",
-                    reason="REQUEST_TOO_LARGE",
-                    client_id=client_id,
-                    credential_fingerprint=None,
-                )
-                return _security_error(
-                    status.HTTP_413_CONTENT_TOO_LARGE,
-                    "REQUEST_TOO_LARGE",
-                    "Request body exceeds the configured limit.",
-                )
-
         authentication = await run_in_threadpool(
             partial(
                 authenticate_api_key,
@@ -313,6 +283,7 @@ def create_app(
 
         client_id = authentication.tenant_id
         request.state.tenant_id = client_id
+        request.state.principal_id = authentication.principal_id
         if runtime_settings.auth_mode == "api_key":
             if authentication.principal_id is None or client_id is None:
                 raise RuntimeError("Authenticated credential has no identity binding")
@@ -390,10 +361,26 @@ def create_app(
                 "error": {
                     "code": "VALIDATION_ERROR",
                     "message": "Request validation failed.",
-                    "details": exc.errors(),
+                    "details": [
+                        {"loc": list(e["loc"]), "type": e["type"], "msg": e["msg"]}
+                        for e in exc.errors()
+                    ],
                 }
             },
         )
+
+    @app.exception_handler(QuotaExceededError)
+    async def quota_error_handler(_: Request, exc: QuotaExceededError) -> JSONResponse:
+        return _security_error(
+            429,
+            "RESOURCE_QUOTA_EXCEEDED",
+            str(exc),
+            headers={"Retry-After": str(runtime_settings.quota_window_seconds)},
+        )
+
+    @app.exception_handler(InvalidCursorError)
+    async def cursor_error_handler(_: Request, exc: InvalidCursorError) -> JSONResponse:
+        return _security_error(422, "INVALID_CURSOR", str(exc))
 
     @app.exception_handler(Exception)
     async def internal_error_handler(_: Request, exc: Exception) -> JSONResponse:
@@ -433,9 +420,13 @@ def create_app(
 
         try:
             policy_snapshot = build_policy_snapshot(
-                payload.policy,
+                payload.policy.model_dump(exclude_none=True),
                 max_attempts=runtime_settings.retry_max_attempts,
-                attempt_timeout_seconds=runtime_settings.retry_attempt_timeout_seconds,
+                attempt_timeout_seconds=min(
+                    runtime_settings.retry_attempt_timeout_seconds,
+                    runtime_settings.execution_lease_seconds - 1,
+                ),
+                max_output_tokens=runtime_settings.provider_max_output_tokens,
                 initial_backoff_seconds=runtime_settings.retry_base_delay_seconds,
                 max_backoff_seconds=runtime_settings.retry_max_backoff_seconds,
                 available_providers={"deterministic"}
@@ -443,6 +434,7 @@ def create_app(
             )
             run, replayed = await _get_service(request).submit(
                 client_id=tenant_id,
+                principal_id=_principal_id(request, tenant_id),
                 idempotency_key=_validate_idempotency_key(idempotency_key),
                 input_payload=payload.input,
                 policy_snapshot=policy_snapshot,
@@ -453,6 +445,8 @@ def create_app(
                 code="IDEMPOTENCY_KEY_REUSED",
                 message=str(exc),
             ) from exc
+        except QuotaExceededError:
+            raise
         except ValueError as exc:
             raise ApiProblem(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -495,16 +489,24 @@ def create_app(
     async def get_attempts(
         run_id: UUID,
         request: Request,
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        cursor: Annotated[UUID | None, Query()] = None,
         client_id: Annotated[str | None, Header(alias="X-Client-Id")] = None,
     ) -> list[AttemptResponse]:
         try:
             attempts = await _get_service(request).get_attempts(
-                client_id=_required_client_id(request, client_id), run_id=run_id
+                client_id=_required_client_id(request, client_id),
+                run_id=run_id,
+                limit=limit,
+                cursor=cursor,
             )
         except RunNotFoundError as exc:
             raise ApiProblem(
                 status_code=status.HTTP_404_NOT_FOUND, code="RUN_NOT_FOUND", message=str(exc)
             ) from exc
+        if len(attempts) == limit:
+            response.headers["X-Next-Cursor"] = str(attempts[-1].id)
         return [_to_attempt_response(attempt) for attempt in attempts]
 
     @app.get(
@@ -515,21 +517,30 @@ def create_app(
     async def get_events(
         run_id: UUID,
         request: Request,
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        cursor: Annotated[UUID | None, Query()] = None,
         client_id: Annotated[str | None, Header(alias="X-Client-Id")] = None,
     ) -> list[EventResponse]:
         try:
             events = await _get_service(request).get_events(
-                client_id=_required_client_id(request, client_id), run_id=run_id
+                client_id=_required_client_id(request, client_id),
+                run_id=run_id,
+                limit=limit,
+                cursor=cursor,
             )
         except RunNotFoundError as exc:
             raise ApiProblem(
                 status_code=status.HTTP_404_NOT_FOUND, code="RUN_NOT_FOUND", message=str(exc)
             ) from exc
+        if len(events) == limit:
+            response.headers["X-Next-Cursor"] = str(events[-1].id)
         return [_to_event_response(event) for event in events]
 
     @app.post(
         "/v1/runs/{run_id}/evaluations",
         response_model=EvaluationResponse,
+        status_code=status.HTTP_202_ACCEPTED,
         responses={404: {"model": ApiErrorResponse}, 409: {"model": ApiErrorResponse}},
     )
     async def evaluate_run(
@@ -543,6 +554,7 @@ def create_app(
                 client_id=_required_client_id(request, client_id),
                 run_id=run_id,
                 rules=payload.rules,
+                principal_id=_principal_id(request, _required_client_id(request, client_id)),
             )
         except RunNotFoundError as exc:
             raise ApiProblem(
@@ -564,43 +576,104 @@ def create_app(
     async def get_evaluations(
         run_id: UUID,
         request: Request,
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        cursor: Annotated[UUID | None, Query()] = None,
         client_id: Annotated[str | None, Header(alias="X-Client-Id")] = None,
     ) -> list[EvaluationResponse]:
         try:
             evaluations = await _get_service(request).get_evaluations(
-                client_id=_required_client_id(request, client_id), run_id=run_id
+                client_id=_required_client_id(request, client_id),
+                run_id=run_id,
+                limit=limit,
+                cursor=cursor,
             )
         except RunNotFoundError as exc:
             raise ApiProblem(
                 status_code=status.HTTP_404_NOT_FOUND, code="RUN_NOT_FOUND", message=str(exc)
             ) from exc
+        if len(evaluations) == limit:
+            response.headers["X-Next-Cursor"] = str(evaluations[-1].id)
         return [_to_evaluation_response(evaluation) for evaluation in evaluations]
 
-    @app.post(
-        "/v1/evaluation-regressions",
-        response_model=dict[str, Any],
-        responses={422: {"model": ApiErrorResponse}},
-    )
+    @app.post("/v1/evaluation-regressions", status_code=202)
     async def run_evaluation_regression(
         payload: EvaluationRegressionRequest,
+        request: Request,
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     ) -> dict[str, Any]:
-        try:
-            dataset = RegressionDataset.from_mapping(payload.dataset.model_dump())
-            baseline = ProviderModelTarget(**payload.baseline.model_dump())
-            candidate = ProviderModelTarget(**payload.candidate.model_dump())
-            _validate_regression_targets(runtime_settings, baseline, candidate)
-            return await _regression_runner(runtime_settings).run(
-                dataset=dataset,
-                baseline=baseline,
-                candidate=candidate,
-                gates=RegressionGates(**payload.gates.model_dump()),
+        if runtime_settings.auth_mode != "api_key":
+            raise ApiProblem(
+                status_code=401,
+                code="AUTHENTICATION_REQUIRED",
+                message="Regression jobs require API-key mode.",
             )
+        tenant = _required_client_id(request, None)
+        if (
+            len(payload.dataset.cases) > runtime_settings.regression_max_cases
+            or 2 * len(payload.dataset.cases) > runtime_settings.regression_provider_call_budget
+        ):
+            raise ApiProblem(
+                status_code=422,
+                code="REGRESSION_BUDGET_EXCEEDED",
+                message="Regression exceeds the server provider-call budget.",
+            )
+        if idempotency_key is None:
+            raise ApiProblem(
+                status_code=422,
+                code="MISSING_IDEMPOTENCY_KEY",
+                message="Idempotency-Key is required.",
+            )
+        try:
+            RegressionDataset.from_mapping(payload.dataset.model_dump())
+            _validate_regression_targets(
+                runtime_settings,
+                ProviderModelTarget(**payload.baseline.model_dump()),
+                ProviderModelTarget(**payload.candidate.model_dump()),
+            )
+            job, replayed = await _get_service(request).submit_regression(
+                client_id=tenant,
+                principal_id=_principal_id(request, tenant),
+                payload=payload.model_dump(),
+                idempotency_key=_validate_idempotency_key(idempotency_key),
+            )
+        except IdempotencyConflictError as exc:
+            raise ApiProblem(
+                status_code=409, code="IDEMPOTENCY_KEY_REUSED", message=str(exc)
+            ) from exc
+        except QuotaExceededError:
+            raise
         except ValueError as exc:
             raise ApiProblem(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                code="INVALID_REGRESSION_REQUEST",
-                message=str(exc),
+                status_code=422, code="INVALID_REGRESSION_REQUEST", message=str(exc)
             ) from exc
+        return {
+            "job_id": str(job.id),
+            "execution_status": job.execution_status,
+            "replayed": replayed,
+            "status_url": f"/v1/jobs/{job.id}",
+        }
+
+    @app.get("/v1/jobs/{job_id}")
+    async def get_job(
+        job_id: UUID,
+        request: Request,
+        client_id: Annotated[str | None, Header(alias="X-Client-Id")] = None,
+    ) -> dict[str, Any]:
+        try:
+            job = await _get_service(request).get_run(
+                client_id=_required_client_id(request, client_id), run_id=job_id
+            )
+            if job.work_kind not in {"evaluation", "regression"}:
+                raise RunNotFoundError("Job was not found")
+        except RunNotFoundError as exc:
+            raise ApiProblem(status_code=404, code="JOB_NOT_FOUND", message=str(exc)) from exc
+        return {
+            "job_id": str(job.id),
+            "execution_status": job.execution_status,
+            "result": job.result_payload,
+            "error_code": job.error_code,
+        }
 
     @app.post(
         "/v1/runs/{run_id}/replay",
@@ -628,6 +701,7 @@ def create_app(
             replay, replayed = await _get_service(request).replay(
                 client_id=_required_client_id(request, client_id),
                 run_id=run_id,
+                principal_id=_principal_id(request, _required_client_id(request, client_id)),
                 idempotency_key=_validate_idempotency_key(idempotency_key),
             )
         except RunNotFoundError as exc:
@@ -649,7 +723,23 @@ def create_app(
             replayed=replayed,
         )
 
+    app.add_middleware(
+        BodyLimitMiddleware,
+        max_bytes=runtime_settings.max_request_bytes,
+        timeout_seconds=runtime_settings.request_body_timeout_seconds,
+    )
     return app
+
+
+def _principal_id(request: Request, tenant: str) -> str:
+    principal = getattr(request.state, "principal_id", None)
+    if isinstance(principal, str):
+        return principal
+    if request.app.state.settings.auth_mode == "disabled":
+        import hashlib
+
+        return "local-" + hashlib.sha256(tenant.encode()).hexdigest()
+    raise RuntimeError("Missing authenticated principal")
 
 
 def _required_client_id(request: Request, client_id: str | None) -> str:

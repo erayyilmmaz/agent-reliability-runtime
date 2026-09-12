@@ -56,13 +56,18 @@ arr_evaluation=$(curl --fail --silent --show-error -X POST "$arr_api_url/$arr_ru
   -H 'Content-Type: application/json' \
   -H 'X-Client-Id: compose-smoke' \
   --data '{"rules":[{"type":"non_empty","path":"missing"}]}')
-printf '%s' "$arr_evaluation" | grep -q '"status":"FAILED"'
+printf '%s' "$arr_evaluation" | grep -q '"status":"PENDING"'
+arr_job_id=$(printf '%s' "$arr_evaluation" | sed -nE 's/.*"job_run_id":"([^"]+)".*/\1/p')
+test -n "$arr_job_id"
+wait_for_success "$arr_job_id"
+curl --fail --silent --show-error "$arr_api_url/$arr_run_id/evaluations" \
+  -H 'X-Client-Id: compose-smoke' | grep -q '"status":"FAILED"'
+wait_for_success "$arr_run_id"
 
-arr_regression=$(curl --fail --silent --show-error -X POST "$arr_regression_url" \
+arr_regression_code=$(curl --silent --show-error -o /dev/null -w '%{http_code}' -X POST "$arr_regression_url" \
   -H 'Content-Type: application/json' \
   --data '{"dataset":{"dataset_id":"compose-smoke","version":"1.0.0","cases":[{"case_id":"prompt-is-preserved","input":{"prompt":"ready"},"rules":[{"type":"rule","path":"accepted_input.prompt","operator":"equals","value":"ready"}]}]},"baseline":{"provider":"deterministic"},"candidate":{"provider":"deterministic"}}')
-printf '%s' "$arr_regression" | grep -q '"schema_version":"evaluation-regression-report.v1"'
-printf '%s' "$arr_regression" | grep -q '"passed":true'
+test "$arr_regression_code" = "401"
 
 arr_replay_response=$(curl --fail --silent --show-error -X POST "$arr_api_url/$arr_run_id/replay" \
   -H 'X-Client-Id: compose-smoke' \
@@ -72,4 +77,4 @@ test -n "$arr_replay_id"
 test "$arr_replay_id" != "$arr_run_id"
 wait_for_success "$arr_replay_id"
 
-echo "Compose smoke passed: run, duplicate, failed evaluation, regression suite, and replay verified."
+echo "Compose smoke passed: run, duplicate, durable evaluation, anonymous regression rejection, and replay verified."
