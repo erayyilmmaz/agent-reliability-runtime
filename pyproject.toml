@@ -9,7 +9,7 @@ description = "A durable, observable runtime for asynchronous AI agent work."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "aio-pika>=9.5,<10",
+  "aio-pika>=9.5,<11",
   "alembic>=1.14,<2",
   "asyncpg>=0.30,<1",
   "cryptography>=46,<51",
