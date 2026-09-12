@@ -155,18 +155,24 @@ ARR_BASE_URL=http://localhost:8001 ARR_API_KEY= k6 run performance-tests/smoke/s
 checks_succeeded: 100.00%   http_req_failed: 0.00%
 ```
 
-Indicative figures from the reference run (see the report for the environment):
+Indicative figures on the reference workstation (10 cores; see §2 of the
+report). **Post-remediation** - PERF-001 through PERF-003 are in:
 
 | Scenario | Observation |
 | -------- | ----------- |
-| smoke (1 VU, authenticated) | submit p50 ≈ 104 ms, read p50 ≈ 88 ms |
-| smoke (1 VU, auth disabled) | submit p50 ≈ 18 ms, read p50 ≈ 7 ms |
-| read sweep | peaks ≈ 71 RPS at 10 VUs, then degrades |
-| submit sweep | peaks ≈ 53 RPS at 10 VUs |
+| read sweep, 1 VU | ≈ 424 RPS, p50 ≈ 2.2 ms |
+| read sweep, 5 VU | ≈ 500-670 RPS, p50 ≈ 7-9 ms |
+| read sweep, peak | ≈ 500-670 RPS, then flat at one saturated core |
+| smoke (1 VU, authenticated) | read p50 ≈ 2-3 ms |
 
-A run that differs substantially is a signal — either the environment differs
-or something changed. Compare like with like (see "Before/after methodology"
-in the report).
+For reference, the same sweep before the remediations: 14.6 RPS at 1 VU with a
+66 ms p50, peaking at 71 RPS. Those numbers are what the audit measured and are
+kept in the report for the before/after comparison.
+
+A run that differs substantially is a signal — either the environment differs or
+something changed. Compare like with like ("Before/after methodology", §22).
+Note that these are **workstation** numbers; a CI runner will be several times
+slower, which is why latency does not gate pull requests.
 
 ---
 
@@ -211,6 +217,68 @@ docker stats --no-stream      # API CPU should dominate
 ```
 
 If k6 itself saturates a core, reduce VUs per process or distribute the load.
+
+---
+
+## What runs in CI, and what does not
+
+| Check | Where | Why |
+| ----- | ----- | --- |
+| `smoke.js` | every PR (`compose-smoke`) | Correctness thresholds only - all checks pass, zero failed requests. Meaningful on any runner. |
+| Structural invariants | every PR (`quality`) | `tests/e2e/test_performance_invariants_live.py`. Deterministic, hardware-independent. |
+| Latency sweep | `.github/workflows/benchmark.yml` - weekly and manual | **Not a PR gate.** |
+
+**Why latency does not gate pull requests.** The baseline in the audit was
+measured on a 10-core workstation; GitHub's hosted runners are roughly 4 shared
+vCPUs with noisy neighbours. A millisecond threshold calibrated on one is noise
+on the other, and a gate that fails for unrelated reasons is one people learn to
+ignore.
+
+What gates instead is structural, and it is what the remediations actually
+established:
+
+| Invariant | Finding it protects |
+| --------- | ------------------- |
+| One audit row per authenticated read | PERF-003 |
+| Query count independent of result size | no N+1 |
+| A rejected submission creates no run, outbox row or attempt | PERF-004 |
+| Alert thresholds sit inside their histogram's bucket range | PERF-OBS-02 |
+| Connection ceiling fits `max_connections` | PERF-009 |
+
+Each of those was verified to fail when its remediation is reverted - a gate
+that has never failed is a gate nobody has tested.
+
+---
+
+## Soak testing
+
+The longest continuous window in the audit was 40 seconds, so slow leaks are
+**not covered**. `soak/soak.js` exists for that and needs a dedicated
+environment, not a laptop between other work:
+
+```bash
+set -a; . performance-tests/.env.perf; set +a
+ARR_VUS=5 ARR_DURATION=1h k6 run performance-tests/soak/soak.js
+```
+
+Watch alongside it:
+
+```bash
+while true; do
+  docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' \
+    | grep -E 'api|worker|dispatcher'
+  psql "$ARR_TEST_DATABASE_URL" -tAc \
+    "SELECT count(*) FROM pg_stat_activity WHERE datname='agent_runtime'"
+  sleep 60
+done
+```
+
+Look for monotonic growth in process memory or connection count over the hour.
+The 40-second profile was flat (+1.5 MiB under load, full recovery), so growth
+across an hour would be a genuine finding rather than noise.
+
+Note that runs, events and audit rows accumulate: disk growth is expected and
+is not a leak. `security_audit_events` is the table to watch (PERF-005).
 
 ---
 

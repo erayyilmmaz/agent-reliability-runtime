@@ -1385,6 +1385,51 @@ on **relative regression** rather than absolute numbers:
 Shared CI runners are noisy; use a ±25% band and require two consecutive
 failures before blocking, or run the gate nightly rather than per-PR.
 
+#### ✅ Resolved — structurally, because latency cannot gate a PR honestly
+
+Stage 1 is in (`smoke.js` runs on every PR). Stage 2 was **not** implemented as
+described, and the reason is worth stating rather than quietly working around.
+
+The plan above proposed gating on `p95 > baseline + 25%`. That baseline was
+measured on a 10-core workstation; GitHub's hosted runners are roughly 4 shared
+vCPUs with noisy neighbours. A millisecond threshold calibrated on one is noise
+on the other — and a gate that fails for reasons unrelated to the change is one
+people learn to ignore, which is worse than no gate.
+
+What transfers between machines is **structure**, and it is exactly what these
+remediations established. `tests/e2e/test_performance_invariants_live.py` runs
+on every pull request against live PostgreSQL and Redis:
+
+| Invariant | Protects | Verified to fail when reverted |
+| --------- | -------- | ------------------------------ |
+| Exactly one audit row per authenticated read | PERF-003 | Yes — reverting gives 40 rows for 20 reads |
+| Query count independent of result size | no N+1 | Yes |
+| A rejected submission creates no run, outbox row or attempt | PERF-004 | Yes — reverting returns `202` instead of `429` |
+| Alert thresholds inside their histogram's bucket range | PERF-OBS-02 | Yes |
+| Connection ceiling fits `max_connections` | PERF-009 | Yes |
+
+Each was confirmed by deliberately reverting its remediation and watching the
+gate fail with a message naming the finding. **A gate that has never failed is
+a gate nobody has tested.**
+
+The latency sweep lives in `.github/workflows/benchmark.yml` — weekly and
+manual, publishing a table to the run summary and uploading the raw k6 exports.
+It is for trend, not for blocking, and it records the runner's core count
+alongside the numbers so nobody compares across hardware by accident.
+
+---
+
+### PERF-TEST-01 — Soak coverage
+
+**Status:** Documented, not executed. The longest continuous window measured in
+this audit is 40 seconds, so slow leaks remain **Not Tested**.
+`performance-tests/README.md` carries the 1-hour procedure and what to watch
+(process memory and connection count, alongside the expected and harmless disk
+growth from append-only tables). The 40-second profile was flat — +1.5 MiB under
+load with full recovery — so growth across an hour would be a genuine finding.
+
+---
+
 ### Stage 3 — production SLOs
 
 Once histograms exist and real traffic is observed, replace the synthetic

@@ -140,6 +140,27 @@ jobs:
           -v "$PWD/docker:/rules:ro" -w /rules
           prom/prometheus:v3.0.1 test rules performance-alerts.test.yml
 
+      # PERF-CI-01: the performance suite must keep working, even though its
+      # latency numbers are not comparable across machines. smoke.js enforces
+      # correctness thresholds only (all checks pass, zero failed requests),
+      # which is meaningful on any runner.
+      - uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1.2.1
+      - name: Performance suite smoke
+        env:
+          GRAFANA_ADMIN_PASSWORD: ci-ephemeral-${{ github.run_id }}
+        run: |
+          bash performance-tests/scripts/setup-env.sh
+          set -a; . performance-tests/.env.perf; set +a
+          docker compose -f docker-compose.yml \
+                         -f performance-tests/docker-compose.perf.yml up -d --build
+          for _ in $(seq 1 60); do
+            curl -fsS http://localhost:8000/healthz >/dev/null 2>&1 && break
+            sleep 2
+          done
+          k6 run performance-tests/smoke/smoke.js
+          docker compose -f docker-compose.yml \
+                         -f performance-tests/docker-compose.perf.yml down -v
+
   helm-lint:
     needs: quality
     runs-on: ubuntu-latest

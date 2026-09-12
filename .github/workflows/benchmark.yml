@@ -1,0 +1,126 @@
+# PERF-CI-02: latency benchmark.
+#
+# Deliberately NOT a pull-request gate.
+#
+# Absolute latency thresholds do not transfer between machines. The baseline in
+# docs/performance-audit.md was measured on a 10-core workstation; GitHub's
+# hosted runners are roughly 4 shared vCPUs with neighbours. Gating PRs on
+# milliseconds measured there would fail for reasons unrelated to the change,
+# and a gate that fails for unrelated reasons is one people learn to ignore.
+#
+# The regressions that actually matter are asserted structurally instead, on
+# every PR, by tests/e2e/test_performance_invariants_live.py: one audit row per
+# read, query count independent of result size, and no durable work for a
+# rejected submission. Those are deterministic on any hardware.
+#
+# This workflow exists for trend, not for blocking: it runs the same sweep on
+# the same runner class each time, publishes the numbers, and compares against
+# the previous run on this branch when one is available.
+name: Benchmark
+
+on:
+  schedule:
+    - cron: "0 4 * * 1" # Mondays, 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      vus:
+        description: Concurrency levels to sweep (space separated)
+        default: "1 5 10 25"
+      duration:
+        description: Duration per level
+        default: "20s"
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    env:
+      GRAFANA_ADMIN_PASSWORD: ci-ephemeral-${{ github.run_id }}
+      # The rate limiter binds at ~166 RPS with the default 60 s window, which
+      # would make the sweep measure admission control rather than service
+      # time. This is the same override the audit used.
+      ARR_PERF_RATE_WINDOW: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1.2.1
+
+      - name: Record the runner this baseline belongs to
+        run: |
+          {
+            echo "## Benchmark environment"
+            echo
+            echo "- runner: \`${{ runner.os }}\` / \`$(nproc)\` cores / $(free -g | awk '/Mem:/{print $2}') GB"
+            echo "- commit: \`${{ github.sha }}\`"
+            echo
+            echo "Numbers are comparable only to other runs on the same runner class."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Start the stack
+        run: |
+          uv sync --locked --dev
+          bash performance-tests/scripts/setup-env.sh
+          set -a; . performance-tests/.env.perf; set +a
+          docker compose -f docker-compose.yml \
+                         -f performance-tests/docker-compose.perf.yml up -d --build
+          for _ in $(seq 1 90); do
+            curl -fsS http://localhost:8000/healthz >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS http://localhost:8000/healthz
+
+      - name: Sweep
+        run: |
+          set -a; . performance-tests/.env.perf; set +a
+          mkdir -p performance-tests/results
+          RUN_ID=$(curl -s -X POST http://localhost:8000/v1/runs \
+            -H 'Content-Type: application/json' -H "X-API-Key: $ARR_API_KEY" \
+            -H "Idempotency-Key: bench-$(date +%s)" \
+            --data '{"input":{"prompt":"benchmark"}}' \
+            | sed -nE 's/.*"run_id":"([^"]+)".*/\1/p')
+          for vus in ${{ github.event.inputs.vus || '1 5 10 25' }}; do
+            ARR_VUS=$vus \
+            ARR_DURATION=${{ github.event.inputs.duration || '20s' }} \
+            ARR_RUN_ID=$RUN_ID \
+              k6 run --quiet \
+                --summary-export=performance-tests/results/read-$vus.json \
+                performance-tests/scripts/read-sweep.js
+          done
+
+      - name: Summarise
+        run: |
+          uv run python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          print("\n## Authenticated read sweep\n")
+          print("| VUs | RPS | p50 | p90 | p95 | errors |")
+          print("| --: | --: | --: | --: | --: | -----: |")
+          for path in sorted(pathlib.Path("performance-tests/results").glob("read-*.json"),
+                             key=lambda p: int(p.stem.split("-")[1])):
+              m = json.loads(path.read_text())["metrics"]
+              d = m["http_req_duration"]
+              print(
+                  f"| {path.stem.split('-')[1]} "
+                  f"| {m['http_reqs']['rate']:.0f} "
+                  f"| {d['med']:.1f} ms | {d['p(90)']:.1f} ms | {d['p(95)']:.1f} ms "
+                  f"| {m['http_req_failed']['value'] * 100:.1f}% |"
+              )
+          print("\n> Compare only against other runs of this workflow. "
+                "See docs/performance-audit.md §22 for why.")
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: benchmark-${{ github.run_id }}
+          path: performance-tests/results/
+
+      - name: Tear down
+        if: always()
+        run: |
+          set -a; . performance-tests/.env.perf 2>/dev/null || true; set +a
+          docker compose -f docker-compose.yml \
+                         -f performance-tests/docker-compose.perf.yml down -v || true
