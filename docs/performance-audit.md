@@ -911,6 +911,77 @@ performance gates in §19.
 
 **Effort:** Low | **Risk:** Low | **Priority:** **P2**
 
+#### ✅ Resolved
+
+Four histograms were added, and the numbers in this report are now computable
+from the running system:
+
+| Instrument | Labels | Buckets |
+| ---------- | ------ | ------- |
+| `http.server.request.duration` (OTel semconv) | `http.route`, `http.request.method`, `http.response.status_class` | HTTP, to 10 s |
+| `arr.db.operation.duration` | `operation` | internal, from 0.5 ms |
+| `arr.provider.call.duration` | `provider` | slow, to 300 s |
+| `arr.outbox.lag` | `event_type` | slow, to 300 s |
+
+**Verified end to end** against the running stack — traffic driven through the
+API, scraped by Prometheus, queried back:
+
+```
+histogram_quantile(0.95, sum by (http_route, le) (rate(http_server_request_duration_seconds_bucket[2m])))
+
+  /v1/runs/{run_id}          p50 2.53 ms   p95 4.81 ms   p99 5.77 ms
+  /v1/runs/{run_id}/events   p50 2.54 ms   p95 4.82 ms   p99 7.09 ms
+  /v1/runs (POST)            p50 18.40 ms  p95 38.27 ms  p99 47.65 ms
+
+histogram_quantile(0.95, sum by (operation, le) (rate(arr_db_operation_duration_seconds_bucket[2m])))
+
+  get_run 2.38 ms   get_events 2.45 ms   submit 38.24 ms
+```
+
+**Cardinality held.** Route labels are templates, never raw paths:
+
+```
+http_route values: ["/healthz", "/v1/runs", "/v1/runs/{run_id}",
+                    "/v1/runs/{run_id}/events", "unmatched"]
+UUID leakage: none
+series: 6 for HTTP, 3 for database operations
+```
+
+`run_id`, `attempt_id` and `principal_id` are asserted never to appear as
+labels (`test_no_identifier_is_ever_used_as_a_label`). A latency histogram
+keyed by `run_id` would be worse than no histogram at all.
+
+---
+
+### PERF-OBS-02 — Latency dashboards and alerts
+
+**Status:** ✅ Resolved
+
+Six Grafana panels (latency by route, percentiles, status-class rate,
+persistence latency, provider latency, outbox lag) and seven Prometheus rules
+in `docker/performance-alerts.yml`.
+
+The rules watch **latency and saturation, not errors**. This audit measured a
+system that degrades by getting slower: error rate stayed at 0.0% through every
+saturation level while p95 rose from 186 ms to 1,468 ms. Alerting on errors
+alone would have stayed silent through a complete capacity collapse. A
+`ARRNoTraffic` rule covers the inverse case, since a latency alert cannot fire
+when nothing is being served.
+
+Thresholds are anchored to the measured baseline rather than invented, and are
+deliberately loose multiples of it so a slower production host does not page on
+ordinary variation. They are not an SLO — retune against real traffic.
+
+> **A bug the alert tests caught, worth recording.** `arr.outbox.lag` and
+> `arr.provider.call.duration` originally reused the HTTP buckets, whose
+> largest finite boundary is 10 s, while their alerts fired above 30 s.
+> `histogram_quantile` never returns more than the largest finite bucket, so
+> **both rules could never have fired** — they would have looked healthy
+> forever. Writing the promtool test surfaced it; the instruments now use
+> boundaries reaching 300 s, and `test_alert_thresholds_are_reachable_within_their_bucket_range`
+> keeps every threshold checked against its instrument's range. An alert that
+> has never fired is an untested alert.
+
 ---
 
 ### PERF-007 — No response compression negotiated

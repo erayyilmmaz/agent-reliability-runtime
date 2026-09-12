@@ -127,6 +127,7 @@ services:
     volumes:
       - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./docker/security-alerts.yml:/etc/prometheus/security-alerts.yml:ro
+      - ./docker/performance-alerts.yml:/etc/prometheus/performance-alerts.yml:ro
     ports:
       - "${ARR_BIND_HOST:-127.0.0.1}:9090:9090"
 

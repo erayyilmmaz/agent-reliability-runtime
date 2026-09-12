@@ -3,6 +3,7 @@ global:
 
 rule_files:
   - /etc/prometheus/security-alerts.yml
+  - /etc/prometheus/performance-alerts.yml
 
 scrape_configs:
   - job_name: agent-reliability-runtime

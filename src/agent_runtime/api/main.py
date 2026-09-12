@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
@@ -160,6 +161,23 @@ def _validate_regression_targets(settings: Settings, *targets: ProviderModelTarg
 SENSITIVE_READ_PATH = re.compile(
     r"/v1/(runs|jobs)/([0-9a-fA-F-]{36})(?:/(attempts|events|evaluations))?"
 )
+
+
+def _record_http_duration(request: Request, status_code: int, seconds: float) -> None:
+    """Record request latency against the matched route template.
+
+    Starlette populates scope["route"] during routing, so the template is
+    available once the handler has run. An unmatched path has no template and
+    collapses to a single series rather than emitting the raw URL.
+    """
+
+    route = getattr(request.scope.get("route"), "path_format", None)
+    get_runtime_metrics().http_request(
+        route=route,
+        method=request.method,
+        status_code=status_code,
+        seconds=seconds,
+    )
 
 
 def _sensitive_read_target(request: Request) -> tuple[UUID, str] | None:
@@ -442,12 +460,17 @@ def create_app(
             get_runtime_metrics().security_event("trace_context", "dropped")
         with safe_span(f"HTTP {request.method}", context=extract_trace_context(valid)) as span:
             span.set_attribute("http.request.method", request.method)
+            started = time.perf_counter()
             try:
                 response = await call_next(request)
             except Exception as exc:
+                # PERF-006: a failed request is still a latency sample, and
+                # excluding it would make the p99 look better than it is.
+                _record_http_duration(request, 500, time.perf_counter() - started)
                 record_safe_exception(exc, event="API_REQUEST_FAILED")
                 raise
             span.set_attribute("http.response.status_code", response.status_code)
+            _record_http_duration(request, response.status_code, time.perf_counter() - started)
             return response
 
     @app.exception_handler(ApiProblem)

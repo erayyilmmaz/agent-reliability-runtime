@@ -66,12 +66,25 @@ class _Counter:
         self._calls.append((self._name, attributes))
 
 
+class _Histogram:
+    def __init__(self, name: str, calls: list[tuple[str, dict[str, str]]]) -> None:
+        self._name = name
+        self._calls = calls
+
+    def record(self, value: float, attributes: dict[str, str] | None = None) -> None:
+        self._calls.append((self._name, attributes or {}))
+
+
 class _Meter:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, str]]] = []
 
     def create_counter(self, name: str, **_: Any) -> _Counter:
         return _Counter(name, self.calls)
+
+    def create_histogram(self, name: str, **_: Any) -> _Histogram:
+        # PERF-006 added latency histograms alongside the counters.
+        return _Histogram(name, self.calls)
 
 
 def test_metrics_normalize_unbounded_values_and_never_accept_run_id_labels() -> None:

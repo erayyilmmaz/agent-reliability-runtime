@@ -1,0 +1,84 @@
+# promtool unit tests for the PERF-OBS-02 rules.
+#
+# An alert that has never fired is an untested alert. The audit's central
+# observation was that this system degrades *without* producing errors, so
+# these tests drive latency up and assert the rules notice.
+rule_files:
+  - performance-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Healthy traffic near the measured baseline must stay quiet.
+  - interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_bucket{http_route="/v1/runs/{run_id}",le="0.005"}'
+        values: "0+60x20"
+      - series: 'http_server_request_duration_seconds_bucket{http_route="/v1/runs/{run_id}",le="+Inf"}'
+        values: "0+60x20"
+      - series: 'http_server_request_duration_seconds_count'
+        values: "0+60x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ARRReadLatencyHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ARRNoTraffic
+        exp_alerts: []
+
+  # Read latency collapses into the slowest bucket: the rule must fire.
+  - interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_bucket{http_route="/v1/runs/{run_id}",le="0.005"}'
+        values: "0+0x20"
+      - series: 'http_server_request_duration_seconds_bucket{http_route="/v1/runs/{run_id}",le="0.5"}'
+        values: "0+60x20"
+      - series: 'http_server_request_duration_seconds_bucket{http_route="/v1/runs/{run_id}",le="+Inf"}'
+        values: "0+60x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ARRReadLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              http_route: "/v1/runs/{run_id}"
+            exp_annotations:
+              summary: Read p95 above 250 ms
+              description: >-
+                Reads are the highest-volume path because wait_for_terminal polls. Measured baseline is 2-5 ms p95; 250 ms is a 50x regression.
+
+  # Traffic stops entirely - latency rules go silent, so this one must not.
+  - interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count'
+        values: "100+0x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ARRNoTraffic
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: No inbound requests observed
+              description: >-
+                A latency alert cannot fire when nothing is being served, so the absence of traffic needs its own signal.
+
+  # Outbox backlog: the queue-lag signal the runtime previously could not report.
+  - interval: 1m
+    input_series:
+      - series: 'arr_outbox_lag_seconds_bucket{le="30"}'
+        values: "0+0x20"
+      - series: 'arr_outbox_lag_seconds_bucket{le="60"}'
+        values: "0+10x20"
+      - series: 'arr_outbox_lag_seconds_bucket{le="+Inf"}'
+        values: "0+10x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ARROutboxLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Outbox events wait more than 30 s before publication
+              description: >-
+                Queue backlog shows up here before it shows up as latency anywhere else. A healthy dispatcher kept this near zero across 10,737 events.

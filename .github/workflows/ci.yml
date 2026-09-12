@@ -134,6 +134,11 @@ jobs:
           docker run --rm --entrypoint /bin/promtool
           -v "$PWD/docker:/rules:ro" -w /rules
           prom/prometheus:v3.0.1 test rules security-alerts.test.yml
+      - name: Test performance alert thresholds
+        run: >-
+          docker run --rm --entrypoint /bin/promtool
+          -v "$PWD/docker:/rules:ro" -w /rules
+          prom/prometheus:v3.0.1 test rules performance-alerts.test.yml
 
   helm-lint:
     needs: quality

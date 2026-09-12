@@ -1,0 +1,106 @@
+# PERF-OBS-02: latency alerting.
+#
+# The performance audit measured a system that degrades by getting slower, not
+# by failing: error rate stayed at 0.0% through every saturation level while
+# p95 rose from 186 ms to 1,468 ms. Alerting on errors alone would therefore
+# have stayed silent through a complete capacity collapse. These rules watch
+# latency and saturation instead.
+#
+# Thresholds are anchored to the measured post-remediation baseline documented
+# in docs/performance-audit.md, not invented: authenticated reads sit near
+# 2-5 ms p95 and submits near 40 ms p95 on the reference host. They are
+# deliberately loose multiples of that so a shared or slower production host
+# does not page on ordinary variation. Retune them against real traffic before
+# treating them as an SLO.
+groups:
+  - name: arr-performance
+    rules:
+      - alert: ARRReadLatencyHigh
+        expr: >-
+          histogram_quantile(0.95, sum by (http_route, le) (
+            rate(http_server_request_duration_seconds_bucket{http_route=~"/v1/runs/.*"}[5m])
+          )) > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Read p95 above 250 ms
+          description: >-
+            Reads are the highest-volume path because wait_for_terminal polls.
+            Measured baseline is 2-5 ms p95; 250 ms is a 50x regression.
+
+      - alert: ARRSubmitLatencyHigh
+        expr: >-
+          histogram_quantile(0.95, sum by (le) (
+            rate(http_server_request_duration_seconds_bucket{http_route="/v1/runs"}[5m])
+          )) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Submit p95 above 500 ms
+          description: Measured baseline is about 40 ms p95.
+
+      - alert: ARRLatencyCollapse
+        expr: >-
+          histogram_quantile(0.99, sum by (le) (
+            rate(http_server_request_duration_seconds_bucket[5m])
+          )) > 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Request p99 above 2 s
+          description: >-
+            The capacity curve degrades without producing errors, so this is
+            the signal that the API tier is saturated.
+
+      - alert: ARRDatabaseLatencyHigh
+        expr: >-
+          histogram_quantile(0.95, sum by (operation, le) (
+            rate(arr_db_operation_duration_seconds_bucket[5m])
+          )) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Persistence operation p95 above 500 ms
+          description: >-
+            Distinguishes a database problem from an application one. The audit
+            measured the hot query at 0.028 ms, so the database is normally not
+            the latency source.
+
+      - alert: ARROutboxLagHigh
+        expr: >-
+          histogram_quantile(0.95, sum by (le) (rate(arr_outbox_lag_seconds_bucket[5m]))) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Outbox events wait more than 30 s before publication
+          description: >-
+            Queue backlog shows up here before it shows up as latency anywhere
+            else. A healthy dispatcher kept this near zero across 10,737 events.
+
+      - alert: ARRProviderLatencyHigh
+        expr: >-
+          histogram_quantile(0.95, sum by (provider, le) (
+            rate(arr_provider_call_duration_seconds_bucket[5m])
+          )) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Provider call p95 above 30 s
+          description: Separates upstream provider slowness from runtime slowness.
+
+      - alert: ARRNoTraffic
+        expr: sum(rate(http_server_request_duration_seconds_count[10m])) == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: No inbound requests observed
+          description: >-
+            A latency alert cannot fire when nothing is being served, so the
+            absence of traffic needs its own signal.

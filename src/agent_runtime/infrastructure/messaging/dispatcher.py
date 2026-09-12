@@ -103,6 +103,16 @@ class OutboxDispatcher:
                     get_runtime_metrics().outbox_dispatch(
                         event_type=event.event_type, outcome="published"
                     )
+                    # PERF-006: how long the event waited between being written
+                    # transactionally and reaching the broker. This is the
+                    # queue-lag signal the runtime previously had no way to
+                    # report; a backlog shows up here before it shows up as
+                    # latency anywhere else.
+                    if event.created_at is not None:
+                        get_runtime_metrics().outbox_lag(
+                            event.event_type,
+                            max(0.0, (event.published_at - event.created_at).total_seconds()),
+                        )
                     session.add(
                         RunEvent(
                             run_id=event.aggregate_id,

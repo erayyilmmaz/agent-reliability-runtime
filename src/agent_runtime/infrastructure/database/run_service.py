@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from copy import deepcopy
-from typing import Any, cast
+from functools import wraps
+from typing import Any, TypeVar, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, tuple_
@@ -42,6 +44,31 @@ def _routing_decision(policy_snapshot: Mapping[str, Any]) -> dict[str, Any] | No
     return dict(decision) if isinstance(decision, Mapping) else None
 
 
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _timed(operation: str) -> Callable[[F], F]:
+    """Record how long a named persistence operation takes (PERF-006).
+
+    Applied at the service boundary rather than inside SQLAlchemy so the label
+    is a stable operation name. Instrumenting per-statement would tie metric
+    cardinality to the query text.
+    """
+
+    def decorate(func: F) -> F:
+        @wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            started = time.perf_counter()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                get_runtime_metrics().db_operation(operation, time.perf_counter() - started)
+
+        return cast(F, wrapper)
+
+    return decorate
+
+
 class SqlAlchemyRunService:
     """Transactional run submission backed by PostgreSQL and the outbox table."""
 
@@ -56,6 +83,7 @@ class SqlAlchemyRunService:
         self._quotas = quotas or QuotaLimits()
         self._job_timeout_seconds = job_timeout_seconds
 
+    @_timed("submit")
     async def submit(
         self,
         *,
@@ -153,11 +181,13 @@ class SqlAlchemyRunService:
                         existing, request_hash
                     )
 
+    @_timed("get_run")
     async def get_run(self, *, client_id: str, run_id: UUID) -> RunSnapshot:
         async with self._session_factory() as session:
             run = await self._get_run_for_client(session, client_id=client_id, run_id=run_id)
             return self._to_run_snapshot(run)
 
+    @_timed("get_attempts")
     async def get_attempts(
         self, *, client_id: str, run_id: UUID, limit: int = 50, cursor: UUID | None = None
     ) -> list[AttemptSnapshot]:
@@ -180,6 +210,7 @@ class SqlAlchemyRunService:
             )
             return [self._to_attempt_snapshot(row) for row in rows]
 
+    @_timed("get_events")
     async def get_events(
         self, *, client_id: str, run_id: UUID, limit: int = 50, cursor: UUID | None = None
     ) -> list[EventSnapshot]:
@@ -200,6 +231,7 @@ class SqlAlchemyRunService:
             )
             return [self._to_event_snapshot(row) for row in rows]
 
+    @_timed("evaluate")
     async def evaluate(
         self,
         *,
@@ -295,6 +327,7 @@ class SqlAlchemyRunService:
             work_kind="regression",
         )
 
+    @_timed("get_evaluations")
     async def get_evaluations(
         self, *, client_id: str, run_id: UUID, limit: int = 50, cursor: UUID | None = None
     ) -> list[EvaluationSnapshot]:
@@ -317,6 +350,7 @@ class SqlAlchemyRunService:
             )
             return [self._to_evaluation_snapshot(row) for row in rows]
 
+    @_timed("replay")
     async def replay(
         self, *, client_id: str, run_id: UUID, idempotency_key: str, principal_id: str | None = None
     ) -> tuple[RunSnapshot, bool]:
