@@ -511,6 +511,7 @@ would be far worse than no histogram at all.
 # credentials.py:14,33-36
 KDF_ITERATIONS = 600_000
 
+
 def derive_verifier(raw_key: str, *, salt: str, pepper: str) -> str:
     material = hmac.digest(pepper.encode(), b"arr-credential-v1\0" + raw_key.encode(), "sha256")
     return hashlib.pbkdf2_hmac("sha256", material, bytes.fromhex(salt), KDF_ITERATIONS).hex()
