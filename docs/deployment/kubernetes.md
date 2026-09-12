@@ -122,28 +122,32 @@ Every process opens its own PostgreSQL pool. The cluster-wide ceiling is:
     must stay below PostgreSQL max_connections
 ```
 
-With the shipped defaults:
+`dbMaxOverflow` defaults to **0** (PERF-011), so `per process` is just
+`dbPoolSize` — 5. With the shipped defaults:
 
 | Scenario | Arithmetic | Total | Default `max_connections` 100 |
 | -------- | ---------- | ----: | ----------------------------- |
-| No autoscaling | `(2+2+1+1) × 10` | 60 | Fits |
-| API autoscaler at max | `(4+2+1+1) × 10` | 80 | Fits |
-| **Both autoscalers at max** | `(4+10+1+1) × 10` | **160** | **Exceeds — do not enable as-is** |
+| No autoscaling | `(2+2+1+1) × 5` | 30 | Fits |
+| API autoscaler at max | `(4+2+1+1) × 5` | 40 | Fits |
+| Both autoscalers at max | `(4+10+1+1) × 5` | 80 | Fits |
 
-To run both autoscalers, do one of:
+Both autoscalers now fit, which was not true while overflow was enabled — the
+same arithmetic gave 160 and this section used to warn against the combination.
 
-- raise `max_connections` on the database (and size its memory accordingly),
-- lower `config.dbPoolSize` / `config.dbMaxOverflow` — measured need is 1-2
-  active connections per API pod at 400+ RPS, so there is room, or
-- put PgBouncer in transaction-pooling mode between the runtime and PostgreSQL.
+Raising `dbMaxOverflow` is the one change here that can *lose* throughput rather
+than gain it; see PERF-011 before doing it. If a pod genuinely needs more
+concurrent database work, raise `dbPoolSize` and re-check this table.
 
 ```bash
 helm upgrade --install arr charts/agent-reliability-runtime \
   --set api.autoscaling.enabled=true \
-  --set api.autoscaling.maxReplicas=4 \
-  --set config.dbPoolSize=5 \
-  --set config.dbMaxOverflow=5
+  --set worker.autoscaling.enabled=true
 ```
+
+If a future configuration does exceed `max_connections`, the options are to
+raise it on the database (sizing its memory accordingly), lower `dbPoolSize` —
+measured need is 1-2 active connections per API pod at 400+ RPS, so there is
+room — or put PgBouncer in transaction-pooling mode in front of PostgreSQL.
 
 Verify after rollout:
 

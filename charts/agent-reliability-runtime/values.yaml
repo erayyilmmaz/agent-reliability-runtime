@@ -101,8 +101,12 @@ config:
   # is deliberately turned on (for example an in-cluster kind demo).
   # PERF-009: per-process pool. Cluster ceiling is
   #   (all replicas) x (dbPoolSize + dbMaxOverflow) < max_connections
+  # PERF-011: overflow is 0 on purpose. Overflow connections are opened per
+  # checkout and closed on return, so load just above dbPoolSize establishes a
+  # new PostgreSQL session every few requests -- measured at a 61% throughput
+  # loss. Raise dbPoolSize, not dbMaxOverflow.
   dbPoolSize: 5
-  dbMaxOverflow: 5
+  dbMaxOverflow: 0
   allowPlaintextTransport: false
   heartbeatIntervalSeconds: 10
   logLevel: INFO

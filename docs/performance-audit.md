@@ -15,14 +15,14 @@
 > and prioritisation tables (§18-§20) are the audit-time record and are
 > deliberately not rewritten.
 >
-> **Remediated** — PERF-001, PERF-003, PERF-004, PERF-005, PERF-006, PERF-007,
-> PERF-008, PERF-009, PERF-OBS-02, and the CI gating approach (§23).
-> **Open** — PERF-002 and soak coverage.
+> **Remediated** — PERF-001 through PERF-011, PERF-OBS-02, and the CI gating
+> approach (§23).
+> **Open** — soak coverage only.
 >
-> PERF-002 has no Resolved block on purpose. Its root cause was removed by
-> PERF-001 rather than addressed on its own terms, and its *mechanism* was
-> inferred rather than measured (§18) — so it is left open pending a
-> re-measurement under overload, not quietly closed.
+> PERF-011 was not in the original audit. It was found while re-measuring
+> PERF-002, which had been left open precisely because its mechanism was
+> inferred rather than measured — and the re-measurement showed the inferred
+> mechanism was the wrong one.
 
 ---
 
@@ -670,6 +670,39 @@ bounded under overload.
 
 **Effort:** Low | **Risk:** Low | **Priority:** **P1**
 
+#### ✅ Resolved — re-measured, and the mechanism was not the one inferred
+
+This finding was deliberately left open after PERF-001 landed, because its
+*mechanism* (threadpool oversubscription) was inferred rather than measured.
+Re-measured on the current code, with `ARR_PERF_RATE_WINDOW=1` so the rate
+limiter is not what is being measured.
+
+The retrograde collapse is gone. Throughput no longer falls as concurrency
+rises past the knee — it plateaus, which is exactly the behaviour the finding
+asked for:
+
+| VUs | RPS | p50 | p95 | Errors |
+| --: | --: | --: | --: | -----: |
+| 50 | 629 | 74.5 ms | 144.7 ms | 0.00% |
+| 100 | 659 | 138.0 ms | 287.1 ms | 0.00% |
+| 200 | 689 | 281.5 ms | 541.4 ms | 0.00% |
+
+Throughput is flat-to-rising from 50 to 200 VUs and latency grows linearly with
+concurrency, which is what a saturated server that queues correctly looks like.
+Compare the original 71.0 → 61.3 → 56.1 RPS with p95 rising 7.9×.
+
+**But the threadpool was never the cause, and the sweep found a sharper problem
+the audit had missed.** Between 5 and 25 VUs throughput collapsed by 61% and
+recovered again — reproducible to within 1.3% across repeated passes. That is
+not oversubscription and it is not a knee; it is connection-pool overflow churn,
+written up as **PERF-011**. The numbers above are with that fixed.
+
+No threadpool change was made. The recommendation to bound
+`current_default_thread_limiter()` was never implemented, and the plateau
+arrived without it — PERF-001 removed the long CPU-bound task the
+oversubscription argument rested on, and PERF-011 removed what was actually
+limiting the middle of the curve.
+
 ---
 
 ### PERF-003 — Every read request performs two database writes
@@ -1297,13 +1330,80 @@ replica can actually use.
 
 **Effort:** Low | **Risk:** Low | **Priority:** **P1**
 
-> **Operator note.** Enabling *both* autoscalers at their defaults
-> (`api.maxReplicas: 4`, `worker.maxReplicas: 10`) gives
-> `(4 + 10 + 1 + 1) × 10 = 160` connections, which exceeds PostgreSQL's default
-> 100. Raise `max_connections`, lower the pools, or put PgBouncer in front
-> before enabling both. This is stated rather than silently defaulted around:
-> there is no pool setting that makes both autoscalers safe against a default
-> PostgreSQL.
+> **Operator note — superseded by PERF-011.** This said that enabling *both*
+> autoscalers gives `(4 + 10 + 1 + 1) × 10 = 160` connections against
+> PostgreSQL's default 100, and that "there is no pool setting that makes both
+> autoscalers safe against a default PostgreSQL". The second half was wrong.
+> With `dbMaxOverflow: 0` the same arithmetic is `× 5 = 80`, which fits — and
+> disabling overflow *raised* throughput rather than trading it away. Both
+> autoscalers are now safe at their defaults.
+
+---
+
+### PERF-011 — Connection-pool overflow churn costs 61% of throughput
+
+**Severity:** High | **Confidence:** Confirmed | **Category:** Database
+**Status:** Confirmed Bottleneck
+**Affected Component:** `src/agent_runtime/infrastructure/database/session.py`
+
+Found while re-measuring PERF-002, not during the original audit.
+
+**Evidence.** An authenticated read sweep at fixed pool settings, two passes,
+reproducible to within 1.3%:
+
+| VUs | 5 | 10 | 15 | 25 |
+| --- | --: | --: | --: | --: |
+| `pool=5, overflow=5` (shipped default) | 900 | **352** | **327** | 652 |
+| `pool=5, overflow=0` | 877 | 836 | 821 | 798 |
+| `pool=10, overflow=0` | 870 | 828 | 801 | 787 |
+
+Throughput fell 61% between 5 and 15 VUs and then recovered — a deep, narrow,
+reproducible dip rather than a knee. Both overflow-free configurations are
+smooth and monotonic, including `pool=5`, which uses *half* the connections of
+the default.
+
+The mechanism is measured directly rather than inferred, using
+`pg_stat_database.sessions` across a 20-second run at 10 VUs:
+
+| | New PostgreSQL sessions | Requests served |
+| --- | --: | --: |
+| overflow enabled | **1,148** | 6,936 |
+| overflow disabled | **10** | 15,787 |
+
+A new PostgreSQL session roughly every six requests.
+
+**Root cause:** SQLAlchemy's `QueuePool` opens an overflow connection when the
+pool is empty and closes it when it is returned — overflow connections are not
+retained. Load sitting *just above* `pool_size` therefore pays a full connection
+establishment on most checkouts. Below `pool_size` no overflow is created; far
+above it, demand exceeds supply so returned connections go straight to a waiter
+and are never closed. That is why the dip is a band rather than a cliff, and why
+it recovers under heavier load.
+
+The default was introduced by PERF-009, which sized the pool for the
+`max_connections` ceiling and did not examine whether overflow should exist at
+all.
+
+**Recommendation:** `max_overflow=0`, and raise `pool_size` if a process needs
+more concurrent database work. Make `pool_timeout` explicit, since queueing is
+now the saturation behaviour.
+
+**Effort:** Low | **Risk:** Low | **Priority:** **P1**
+
+#### ✅ Resolved
+
+`db_max_overflow` now defaults to 0 and `db_pool_timeout_seconds` is explicit;
+`charts/.../values.yaml` sets `dbMaxOverflow: 0` with the reasoning inline.
+
+Verified at saturation with overflow off — 50/100/200 VUs returned 629/659/689
+RPS with **0.00% errors**, so queueing for a pooled connection does not turn
+into `pool_timeout` failures at concurrencies well past the plateau.
+
+Two consequences worth stating. The cluster connection ceiling halves, which is
+what makes both autoscalers fit (the note above). And this is the second finding
+in this report where the recommendation of an earlier one made things worse in a
+way nobody measured: PERF-009 was right about the ceiling and silent about
+overflow.
 
 ---
 

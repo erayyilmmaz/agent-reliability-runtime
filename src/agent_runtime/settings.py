@@ -29,7 +29,13 @@ class Settings(BaseSettings):
     # small. See docs/security/least-privilege.md and the scaling section of
     # docs/performance-audit.md before raising them.
     db_pool_size: int = Field(default=5, ge=1, le=50)
-    db_max_overflow: int = Field(default=5, ge=0, le=50)
+    # 0 by design. Overflow connections are opened per checkout and closed
+    # on return, so any load that sits just above db_pool_size pays a fresh
+    # PostgreSQL connection every few requests -- measured at 1,148 new
+    # sessions in 20 s and a 61% throughput loss (PERF-011). Queueing for a
+    # pooled connection is far cheaper than establishing one.
+    db_max_overflow: int = Field(default=0, ge=0, le=50)
+    db_pool_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     redis_url: AnyUrl = AnyUrl("redis://localhost:6379/0")
     rabbitmq_url: AnyUrl = AnyUrl("amqp://runtime:runtime@localhost:5672/")
     allow_plaintext_transport: bool = False
