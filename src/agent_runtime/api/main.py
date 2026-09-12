@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.gzip import GZipMiddleware
 
 from agent_runtime.api.body_limit import BodyLimitMiddleware
 from agent_runtime.api.schemas import (
@@ -268,6 +269,29 @@ def create_app(
     )
     app.state.settings = runtime_settings
     app.state.run_service = run_service
+
+    # PERF-007. Registered here, before the two http middlewares, so it ends up
+    # *inside* both. That placement is load-bearing for two reasons.
+    #
+    # 1. minimum_size only works from inside. BaseHTTPMiddleware re-emits the
+    #    response as a stream with no Content-Length, so a GZip registered
+    #    outside it cannot know the body size and compresses everything --
+    #    measured: a 15-byte response came back gzipped and chunked. From the
+    #    inside it sees the real Content-Length and leaves small bodies alone.
+    # 2. Compression is time the caller waits for, so it belongs inside
+    #    trace_http_request; measured outside, arr.http.server.duration
+    #    (PERF-006) would understate service time.
+    #
+    # Starlette hands bodies above its own thread_minimum_size (128 KiB) to a
+    # threadpool. Every page this API can produce is far below that -- the
+    # largest is a 100-event page at ~22 KB -- so compression always runs on
+    # the event loop, which is why the level is not the library default.
+    if runtime_settings.response_compression_min_bytes:
+        app.add_middleware(
+            GZipMiddleware,
+            minimum_size=runtime_settings.response_compression_min_bytes,
+            compresslevel=runtime_settings.response_compression_level,
+        )
 
     async def write_security_audit(
         *,

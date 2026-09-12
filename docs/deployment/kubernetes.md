@@ -154,3 +154,60 @@ psql "$ADMIN_URL" -c \
    (SELECT setting::int AS max_conn FROM pg_settings WHERE name='max_connections') s
    GROUP BY max_conn;"
 ```
+
+## Admission ceilings are also capacity ceilings (PERF-008)
+
+The limits in `docs/security/resource-controls.md` are a security control and
+are working as designed. They are repeated here because they *also* decide how
+much of a pod's measured capacity any one caller can reach, and the two
+readings need reconciling before an incident does it for you.
+
+| Setting (`APP_` prefix) | Default | Hard bound | What it caps per window |
+| ----------------------- | ------: | ---------: | ----------------------- |
+| `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | 60 / 60 s | ≤ 10,000 / ≥ 1 s | HTTP requests **per principal** |
+| `PRINCIPAL_PROVIDER_CALLS` | 120 | ≤ 10,000 | Provider calls per principal |
+| `TENANT_PROVIDER_CALLS` | 240 | ≤ 20,000 | Provider calls per tenant |
+| `QUOTA_WINDOW_SECONDS` | 3600 s | 60-86,400 s | The window both call quotas use |
+
+The hard bounds are what an operator may configure. They exist so a
+misconfiguration cannot switch admission control off; they are not tuning
+targets.
+
+**The default rate limit is one request per second, per principal.** 60
+requests over a 60 s fixed window. A pod serves ~450-500 RPS, so at defaults a
+single caller reaches well under 1% of one pod, and the measured throughput
+figures in `docs/performance-audit.md` are only reachable because
+`performance-tests/docker-compose.perf.yml` raises the ceiling
+(`APP_RATE_LIMIT_REQUESTS=10000`). If a production integration is expected to
+sustain more than 1 RPS, that limit — not capacity — is what it will hit first,
+and it fails as `429`, not as latency.
+
+Because the window is fixed rather than rolling, a caller can spend the whole
+allowance at the end of one window and again at the start of the next: size for
+`2 × limit` arriving back to back, not for `limit / window` as a smooth rate.
+
+**Reconciling provider calls with the commercial budget.** Quotas cap calls, not
+currency, and they are per principal and per tenant — never global. The
+cluster-wide worst case is:
+
+```
+principals × PRINCIPAL_PROVIDER_CALLS   (bounded again per tenant by
+                                         tenants × TENANT_PROVIDER_CALLS)
+    calls per QUOTA_WINDOW_SECONDS
+```
+
+At defaults that is 120 calls/hour per principal and 240/hour per tenant. Ten
+tenants of two principals each is up to 2,400 calls/hour, and nothing in the
+runtime stops the eleventh tenant from adding 240 more. Set these so the sum
+across the tenants you have provisioned stays inside the spend limit on the
+provider account, and treat the provider account's own cap as the real backstop
+— reservations are conservative and are not refunded on failure, but they are
+also not billing.
+
+Since PERF-004 the provider-call budget is checked at admission, so exhaustion
+returns `429` at submit instead of consuming the full pipeline and failing at
+the worker. That changes the failure into a cheap one; it does not raise the
+ceiling.
+
+Every role must receive the same limits — the API rejects at admission and the
+worker reserves at execution, and they disagree if configured differently.

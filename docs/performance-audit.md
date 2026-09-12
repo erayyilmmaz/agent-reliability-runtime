@@ -9,14 +9,15 @@
 
 > Findings are kept as written, at the numbers they were measured at. Where a
 > finding has since been remediated on `main`, a `✅ Resolved` block inside that
-> finding records what shipped and the re-measured result — including the four
-> places where the fix differed from the recommendation, and why. The summary
+> finding records what shipped and the re-measured result — including every
+> place where the fix differed from the recommendation, or where implementing
+> it turned up something the audit had not seen, and why. The summary
 > and prioritisation tables (§18-§20) are the audit-time record and are
 > deliberately not rewritten.
 >
-> **Remediated** — PERF-001, PERF-003, PERF-004, PERF-005, PERF-006, PERF-009,
-> PERF-OBS-02, and the CI gating approach (§23).
-> **Open** — PERF-002, PERF-007, PERF-008, and soak coverage.
+> **Remediated** — PERF-001, PERF-003, PERF-004, PERF-005, PERF-006, PERF-007,
+> PERF-008, PERF-009, PERF-OBS-02, and the CI gating approach (§23).
+> **Open** — PERF-002 and soak coverage.
 >
 > PERF-002 has no Resolved block on purpose. Its root cause was removed by
 > PERF-001 rather than addressed on its own terms, and its *mechanism* was
@@ -1100,6 +1101,51 @@ enable it unconditionally for small responses.
 
 **Effort:** Low | **Risk:** Low | **Priority:** **P3**
 
+#### ✅ Resolved
+
+`GZipMiddleware(minimum_size=1024, compresslevel=1)`, behind
+`APP_RESPONSE_COMPRESSION_MIN_BYTES` (0 disables it for deployments that
+terminate compression at the ingress).
+
+The audit called this "currently harmless" from payloads of 260-1,236 bytes.
+That was the small page. Re-measured on a real event page, the largest response
+this API can produce is a 100-event page at ~217 bytes per event:
+
+| Page | Raw | gzip | Ratio | CPU (median) |
+| ---- | --: | ---: | ----: | -----------: |
+| 5 events | 1,236 B | 578 B | 0.47 | 0.011 ms |
+| 30 events | 6,511 B | 1,969 B | 0.30 | 0.030 ms |
+| 100 events (the `limit` cap) | 21,821 B | 3,779 B | **0.17** | 0.083 ms |
+
+**Level 1, not the library default of 9.** Compression runs on the event loop —
+Starlette only offloads bodies above 128 KiB, and every page here is far below
+that — and the event loop is this system's ceiling (PERF-010). On the 100-event
+page level 1 keeps **97.8%** of level 9's byte saving (17,644 B vs 18,034 B
+saved) for **38%** of the CPU (0.031 ms vs 0.082 ms).
+
+**The middleware had to go inside the two `BaseHTTPMiddleware` layers, not
+outside them.** This was not the plan and is the part worth recording.
+`BaseHTTPMiddleware` re-emits the response as a stream with no `Content-Length`,
+so a `GZipMiddleware` registered outside it cannot see the body size and
+compresses *everything* — measured directly: a 15-byte response came back
+`Content-Encoding: gzip` and chunked, with `minimum_size=1024` set. The
+conventional outermost placement would therefore have applied gzip to every
+`/healthz` and every single-run read, which is precisely the CPU spend the
+finding warned against. From the inside it sees the real `Content-Length` and
+leaves small bodies alone. Inner placement also keeps compression inside
+`trace_http_request`, so `arr.http.server.duration` (PERF-006) still measures
+the whole time the caller waits.
+
+Live verification on the perf stack: `events?limit=100` returned
+`content-encoding: gzip` at 2,019 B against 6,511 B uncompressed (30 events
+available), an 806 B single-run read and a 31 B `/healthz` were both left alone,
+and `Accept-Encoding: identity` was honoured.
+
+**Verified by** `tests/unit/test_response_compression.py`. The ordering
+assertion is a real gate: moving the registration outward fails it with
+`assert 1 > 2`, and fails `test_small_responses_are_not_compressed` for the
+separate, mechanical reason above.
+
 ---
 
 ### PERF-008 — Admission-control ceilings cap per-replica capacity
@@ -1131,6 +1177,32 @@ intended production values and confirm the provider-call ceiling matches the
 commercial provider budget. Revisit only alongside PERF-004.
 
 **Effort:** Low | **Risk:** Low | **Priority:** **P3**
+
+#### ✅ Resolved — as documentation, which is what the finding asked for
+
+No code change, on purpose: the ceilings are a SEC-E2 security control and
+nothing here justifies loosening them. What was missing was the capacity
+reading, now in `docs/deployment/kubernetes.md` — "Admission ceilings are also
+capacity ceilings".
+
+Writing it up surfaced one number worth stating plainly. **The default rate
+limit is 60 requests per 60 s per principal — one request per second.** A pod
+serves ~450-500 RPS, so at defaults a single caller reaches under 1% of one pod,
+and every throughput figure in this report is only reachable because the perf
+overlay raises `APP_RATE_LIMIT_REQUESTS` to 10,000. For a real integration that
+limit, not capacity, is the first thing hit, and it arrives as `429` rather than
+as latency. The window is fixed rather than rolling, so the honest sizing
+assumption is `2 × limit` back to back across a window boundary.
+
+The provider-call reconciliation the finding asked for is the arithmetic
+`principals × PRINCIPAL_PROVIDER_CALLS` per `QUOTA_WINDOW_SECONDS`, bounded
+again per tenant — 120/hour per principal and 240/hour per tenant at defaults,
+with nothing global. These cap calls, not currency, so the provider account's
+own spend limit remains the backstop.
+
+PERF-004 already changed *where* exhaustion is detected — `429` at admission
+instead of a wasted pipeline and a worker-side failure. It did not change the
+ceiling, and this finding is why that distinction is written down.
 
 ---
 

@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     # by setting a horizon (PERF-005).
     audit_retention_days: int | None = Field(default=None, ge=1, le=3650)
     audit_purge_batch_size: int = Field(default=1000, ge=1, le=50_000)
+    # 0 disables in-process compression, for deployments that terminate it
+    # at the ingress and want the CPU off the application (PERF-007).
+    response_compression_min_bytes: int = Field(default=1024, ge=0, le=1_000_000)
+    response_compression_level: int = Field(default=1, ge=1, le=9)
     worker_concurrency: int = Field(default=4, ge=1, le=128)
     provider_timeout_seconds: int = Field(default=60, ge=1, le=600)
     retry_max_attempts: int = Field(default=3, ge=1, le=20)
