@@ -278,7 +278,10 @@ The 40-second profile was flat (+1.5 MiB under load, full recovery), so growth
 across an hour would be a genuine finding rather than noise.
 
 Note that runs, events and audit rows accumulate: disk growth is expected and
-is not a leak. `security_audit_events` is the table to watch (PERF-005).
+is not a leak. `security_audit_events` is the table to watch (PERF-005). It is
+indexed for both of its access patterns now, and `agent-runtime-audit-purge`
+can age rows out between campaigns — but it deletes real audit history, so on a
+disposable stack prefer `docker compose ... down -v` above.
 
 ---
 

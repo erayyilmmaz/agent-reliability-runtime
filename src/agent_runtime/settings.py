@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     trust_inbound_trace_context: bool = False
     deterministic_echo_input: bool = False
     payload_retention_days: int = Field(default=30, ge=1, le=3650)
+    # Unset means audit retention is disabled: security_audit_events is
+    # append-only and nothing ages rows out unless an operator opts in
+    # by setting a horizon (PERF-005).
+    audit_retention_days: int | None = Field(default=None, ge=1, le=3650)
+    audit_purge_batch_size: int = Field(default=1000, ge=1, le=50_000)
     worker_concurrency: int = Field(default=4, ge=1, le=128)
     provider_timeout_seconds: int = Field(default=60, ge=1, le=600)
     retry_max_attempts: int = Field(default=3, ge=1, le=20)

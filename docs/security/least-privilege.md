@@ -110,6 +110,17 @@ code, which is the right design. But a table's owner can run
 those triggers protect against application bugs, not against a compromised
 application.
 
+Audit retention does not use that escape hatch. `security_audit_events` needs a
+way to age rows out (PERF-005), and disabling the trigger would both stall the
+request path — it takes `ShareRowExclusiveLock`, measured blocking a concurrent
+audit `INSERT` for 4.0 s — and open deletes to *every* session for as long as it
+is off. Instead the trigger admits a `DELETE` only from a transaction that has
+set `arr.allow_audit_purge = 'on'` via `SET LOCAL`, which expires with that one
+transaction. `UPDATE` is never admitted. The gate is not the boundary: the
+boundary is that `arr_runtime` holds `INSERT` only and cannot delete whatever it
+sets. What the gate adds is that the owner cannot erase audit history by
+accident. See `src/agent_runtime/security/audit_retention.py`.
+
 `scripts/sql/roles.sql` creates two roles:
 
 | Role | Used by | Capabilities |

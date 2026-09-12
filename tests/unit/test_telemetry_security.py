@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from opentelemetry.sdk.trace import TracerProvider
@@ -15,6 +16,12 @@ from agent_runtime.observability.logging import JsonFormatter
 from agent_runtime.observability.telemetry import sanitize_trace_context
 from agent_runtime.providers.deterministic import DeterministicProvider
 from agent_runtime.security.audit import safe_text
+from agent_runtime.settings import Settings
+
+
+def _settings(**overrides) -> Settings:
+    return Settings(environment="local", auth_mode="disabled", **overrides)
+
 
 PARENT = "00-00000000000000000000000000000001-0000000000000002-01"
 
@@ -123,3 +130,41 @@ def test_retention_cli_requires_exact_erasure_confirmation(args, monkeypatch):
     with pytest.raises(SystemExit) as caught:
         main()
     assert caught.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--apply"],
+        ["--apply", "--confirm-retention-days", "7"],
+    ],
+)
+def test_audit_purge_refuses_apply_without_a_matching_horizon(args, monkeypatch):
+    """PERF-005: deletion on an append-only table needs the horizon restated."""
+
+    from agent_runtime.security import audit_retention
+
+    monkeypatch.setattr(audit_retention, "get_settings", lambda: _settings(audit_retention_days=30))
+    monkeypatch.setattr(sys, "argv", ["agent-runtime-audit-purge", *args])
+    with pytest.raises(SystemExit) as caught:
+        audit_retention.main()
+    assert caught.value.code == 2
+
+
+def test_audit_purge_refuses_apply_when_retention_is_unset(monkeypatch):
+    from agent_runtime.security import audit_retention
+
+    monkeypatch.setattr(audit_retention, "get_settings", _settings)
+    monkeypatch.setattr(
+        sys, "argv", ["agent-runtime-audit-purge", "--apply", "--confirm-retention-days", "30"]
+    )
+    with pytest.raises(SystemExit) as caught:
+        audit_retention.main()
+    assert caught.value.code == 2
+
+
+def test_audit_purge_cutoff_follows_the_configured_horizon():
+    from agent_runtime.security.audit_retention import resolve_cutoff
+
+    now = datetime(2026, 9, 12, tzinfo=UTC)
+    assert resolve_cutoff(_settings(audit_retention_days=30), now=now) == now - timedelta(days=30)

@@ -7,6 +7,11 @@
 -- and rewrite the audit history. The triggers then protect against application
 -- bugs but not against a compromised application.
 --
+-- Audit retention deliberately does not take that route: the purge tool opts a
+-- single transaction out via SET LOCAL arr.allow_audit_purge, so the trigger is
+-- never disabled and concurrent audit writes are never blocked (PERF-005). It
+-- runs as arr_migrator because arr_runtime holds INSERT only here, as below.
+--
 -- Run this once per database as a superuser, BEFORE the first migration.
 -- Replace both passwords with values from your secret manager.
 --

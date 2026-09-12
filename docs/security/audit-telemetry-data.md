@@ -31,7 +31,14 @@ critical ARRAuditWriteFailure rule. The SQL sink bounds strings at the final
 persistence boundary: event/reason/fingerprint 64, outcome 16, tenant/principal
 128; control and surrogate characters are replaced. Only technical identifiers
 and server-selected reasons belong in these fields—truncation is not redaction.
-The append-only audit trigger is unchanged.
+The append-only audit trigger still refuses every `UPDATE` and every `DELETE`,
+with one deliberate exception added for retention (PERF-005): a transaction that
+has set `arr.allow_audit_purge = 'on'` via `SET LOCAL` may `DELETE`. That is
+scoped to a single transaction, takes no table-level lock, and never admits an
+`UPDATE`. `agent-runtime-audit-purge` is the only tool that sets it; it is
+disabled unless `APP_AUDIT_RETENTION_DAYS` is configured, dry-run by default,
+and requires the horizon restated with `--confirm-retention-days` before it
+deletes anything. Retention remains off in this repository's defaults.
 
 ## Sensitive read trail — SEC-AUD-01
 
@@ -146,6 +153,41 @@ transaction. The CLI is trusted operator tooling using DB authority, not an
 HTTP endpoint; `--principal-id` is an operator assertion, not credential verification.
 There is no automatic timer or purge on startup. Tombstones refuse re-creation;
 decrypt then fails with KeyDestroyedError. Dry-run does not destroy anything.
+
+### Audit retention — PERF-005
+
+A separate mechanism from tenant-key erasure above, with a separate tool. Key
+erasure destroys a DEK so payloads become unreadable; this ages rows out of
+`security_audit_events`, which grows with authenticated read traffic and
+otherwise has no upper bound.
+
+It is off by default. `APP_AUDIT_RETENTION_DAYS` has no default value, because
+how long security history is kept is a policy decision, not an operational one.
+Until it is set, the tool refuses to run at all.
+
+```bash
+# Preview only. Reports how many rows are past the horizon; deletes nothing.
+APP_AUDIT_RETENTION_DAYS=365 uv run agent-runtime-audit-purge
+
+# Delete, bounded to two batches so a first run on a large table is observable.
+APP_AUDIT_RETENTION_DAYS=365 uv run agent-runtime-audit-purge \
+  --apply --confirm-retention-days 365 --max-batches 2 --pause-seconds 1
+```
+
+`--confirm-retention-days` must match the configured horizon: deletion from an
+append-only table is irreversible, so the operator restates it rather than
+inheriting it from an environment they may not have set. Output is JSON —
+`eligible`, `deleted`, per-batch counts, and `stopped_early`.
+
+The tool connects with `APP_MIGRATION_DATABASE_URL` (the DDL role). Per SEC-018
+`arr_runtime` holds `INSERT` only on this table and cannot delete; running the
+purge as the runtime role fails on privileges, which is intended. Deletes run in
+`APP_AUDIT_PURGE_BATCH_SIZE` batches (default 1,000, measured at 2.6 ms per
+batch), each in its own transaction, so nothing holds locks across the run.
+
+There is no scheduler, no startup purge and no timer. Partitioning by month —
+which would make retention a `DROP PARTITION` — remains the scale-out path and
+is not implemented.
 
 ### Production gate — intentionally outstanding
 

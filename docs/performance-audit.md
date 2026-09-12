@@ -1,11 +1,27 @@
 # Performance & Scalability Audit
 
 **Target:** Agent Reliability Runtime (`agent-reliability-runtime` v0.1.0)
-**Revision:** `743a714` (branch `main`) — PERF-001 remediated, see its Resolved block
+**Revision measured:** `743a714` (branch `main`)
 **Date:** 2026-09-12
 **Type:** Measurement-driven performance and scalability audit
 **Method:** Measure → Analyze → Diagnose → Prioritize → Recommend
-**Application code was not modified.**
+**No application code was modified during the audit itself.**
+
+> Findings are kept as written, at the numbers they were measured at. Where a
+> finding has since been remediated on `main`, a `✅ Resolved` block inside that
+> finding records what shipped and the re-measured result — including the four
+> places where the fix differed from the recommendation, and why. The summary
+> and prioritisation tables (§18-§20) are the audit-time record and are
+> deliberately not rewritten.
+>
+> **Remediated** — PERF-001, PERF-003, PERF-004, PERF-005, PERF-006, PERF-009,
+> PERF-OBS-02, and the CI gating approach (§23).
+> **Open** — PERF-002, PERF-007, PERF-008, and soak coverage.
+>
+> PERF-002 has no Resolved block on purpose. Its root cause was removed by
+> PERF-001 rather than addressed on its own terms, and its *mechanism* was
+> inferred rather than measured (§18) — so it is left open pending a
+> re-measurement under overload, not quietly closed.
 
 ---
 
@@ -877,6 +893,85 @@ at current size, and bounded as the table grows. Retention becomes feasible at a
 
 **Effort:** Low (indexes) / Medium (partitioning + purge) | **Risk:** Low
 | **Priority:** **P2**
+
+#### ✅ Resolved
+
+Migrations `20260912_10` (indexes) and `20260912_11` (retention gate), plus
+`src/agent_runtime/security/audit_retention.py`.
+
+**Indexes.** Both built `CONCURRENTLY` — this table is written on the request
+path, so a plain `CREATE INDEX` would block every authenticated request for the
+duration of the build. Re-measured against 30,001 rows / 7,112 kB:
+
+| Query | Before | After | Plan after |
+| ----- | -----: | ----: | ---------- |
+| Forensics `WHERE target_run_id = ? ORDER BY created_at DESC LIMIT 50` | 4.580 ms / 511 buffers | **0.168 ms / 65 buffers** | Bitmap Heap Scan on `ix_security_audit_events_target` |
+| Retention count `WHERE created_at < ?` | 2.670 ms / 511 buffers | **0.011 ms / 3 buffers** | Index Only Scan |
+| Retention batch `ORDER BY created_at LIMIT 1000` | (seq scan) | **0.201 ms / 23 buffers** | Index Scan |
+
+The forensic index is `(target_run_id, created_at DESC) WHERE target_run_id IS
+NOT NULL`: partial, because only sensitive-read rows carry a target, and the
+trailing column serves the `ORDER BY`, removing the top-N heapsort.
+
+**Retention.** The audit recommended partitioning so that purging is a `DROP
+PARTITION` rather than a bulk `DELETE`. That is still the right end state and is
+recorded below as the scale-out path, but it is not what shipped, for two
+reasons: converting to a partitioned table requires `created_at` in the primary
+key — a schema change to an append-only table holding live audit history — and
+the table is nowhere near a size that needs it. What shipped is a bounded,
+batched purge.
+
+The mechanism matters more than the batching. The obvious way to delete from a
+table whose trigger forbids `DELETE` is to turn the trigger off around the
+purge. That was measured and rejected:
+
+| Concurrent audit `INSERT` | Latency |
+| ------------------------- | ------: |
+| Baseline, no purge running | 0.911 ms |
+| During a gated purge (6 s transaction) | **1.734 ms** |
+| During `ALTER TABLE … DISABLE TRIGGER` (6 s transaction) | **4008.794 ms** |
+
+`ALTER TABLE … DISABLE TRIGGER` takes `ShareRowExclusiveLock`, which conflicts
+with the `RowExclusiveLock` an `INSERT` needs. Audit writes sit on the request
+path, so that row is an API stall for the length of the purge — and its blast
+radius is wrong besides: while the trigger is off, *every* session's deletes
+pass, not just the purge's.
+
+Migration `20260912_11` replaces it with a transaction-scoped gate. The trigger
+still refuses every `UPDATE` and every `DELETE` unless the deleting transaction
+has set `arr.allow_audit_purge = 'on'` via `SET LOCAL`, which takes no
+table-level lock and expires with the transaction. The gate is **not** the
+security boundary and is not offered as one: per SEC-018 the runtime role holds
+`INSERT` only on this table and cannot delete whatever it sets. The grant is the
+boundary. What the gate buys is that the owner role cannot delete audit history
+by accident — only by saying so, in the same transaction.
+
+`agent-runtime-audit-purge` is operator tooling, not a scheduled job:
+
+- disabled unless `APP_AUDIT_RETENTION_DAYS` is set — no default horizon, because
+  choosing how long security history lives is not a performance decision;
+- dry-run by default, reporting the eligible count without deleting;
+- `--apply` additionally requires `--confirm-retention-days` to match the
+  configured horizon, since deletion on an append-only table is irreversible;
+- deletes in `APP_AUDIT_PURGE_BATCH_SIZE` batches (default 1,000), each in its
+  own short transaction, with optional `--pause-seconds` between them;
+- connects with `effective_migration_database_url`, the DDL credential.
+
+A 1,000-row batch plans as an Index Scan feeding a Tid Scan and executes in
+**2.640 ms**, of which the append-only trigger firing 1,000 times costs 0.705 ms.
+
+**Verified by** `tests/e2e/test_audit_retention_live.py` — expired rows removed
+and rows inside the horizon kept; dry-run deletes nothing; `--max-batches`
+bounds a first run; `UPDATE` and `DELETE` still rejected immediately after a
+purge commits, proving the gate did not leak past its transaction. The
+concurrency test asserts the purge holds `RowExclusiveLock` **only**; reverting
+it to `ALTER TABLE … DISABLE TRIGGER` fails it with
+`{'RowExclusiveLock', 'ShareRowExclusiveLock'}`, and a `lock_timeout` keeps a
+regression failing rather than hanging.
+
+**Still open.** Partitioning by month remains the scale-out path when volume
+justifies the schema change, and nothing schedules the purge — it is run by an
+operator who has chosen a horizon.
 
 ---
 
