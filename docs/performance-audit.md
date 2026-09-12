@@ -742,6 +742,41 @@ synchronous `429` instead of an asynchronous `FAILED` discovered by polling.
 
 **Effort:** Medium | **Risk:** Low | **Priority:** **P1**
 
+#### ✅ Resolved
+
+`check_admission()` now calls `check_provider_budget()` under the advisory lock
+the API already holds. A submission whose budget is provably spent is rejected
+with `429 RESOURCE_QUOTA_EXCEEDED` and a `Retry-After` header, before any
+durable record exists.
+
+**The admission check is deliberately advisory.** `charge_provider_call()`
+remains the authoritative accounting, because budget can be consumed between
+admission and execution by runs already in flight, and because a multi-case
+regression job can exhaust its budget part-way through. Admission does not
+decrement anything — verified by
+`test_admission_budget_check_does_not_consume_budget`, which submits three runs
+and asserts the counter stays at zero. Charging at both points would bill an
+accepted run twice.
+
+Proven against live PostgreSQL and Redis by
+`test_exhausted_provider_budget_is_rejected_at_admission_not_at_the_worker`,
+which spends the budget, submits one run, and asserts that the counts of
+`runs`, `outbox_events` and `run_attempts` are **unchanged**:
+
+| | Before | After |
+| - | ------ | ----- |
+| HTTP response | `202 Accepted` | `429 RESOURCE_QUOTA_EXCEEDED` + `Retry-After` |
+| Durable records created | run + outbox + attempt + lease | **none** |
+| Where the caller learns | polling the status URL | the submit response |
+| Pipeline traversed | API → outbox → dispatcher → AMQP → worker | API only |
+
+One existing test changed behaviour and was updated rather than worked around:
+`test_durable_evaluation_regression_jobs_and_provider_budget` asserted that a
+job submitted with an exhausted budget is accepted and *later* reports
+`RESOURCE_QUOTA_EXCEEDED`. It now asserts the synchronous rejection. The
+execution-time path it used to cover is still covered directly, and under
+concurrency, by `test_atomic_provider_quota_races`.
+
 ---
 
 ### PERF-005 — `security_audit_events` is unbounded and unindexed for its own access patterns

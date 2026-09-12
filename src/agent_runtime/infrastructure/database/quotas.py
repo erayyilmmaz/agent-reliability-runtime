@@ -46,6 +46,47 @@ async def lock_identity(session: AsyncSession, principal: str, tenant: str) -> N
         )
 
 
+def _current_window(now: int, window_seconds: int) -> int:
+    return now // window_seconds * window_seconds
+
+
+async def _epoch_now(session: AsyncSession) -> int:
+    return int(await session.scalar(select(func.extract("epoch", func.clock_timestamp()))) or 0)
+
+
+async def check_provider_budget(
+    session: AsyncSession, principal: str, tenant: str, limits: QuotaLimits
+) -> None:
+    """Reject at admission what would certainly be rejected at execution.
+
+    This is **advisory**. `charge_provider_call()` stays the authoritative
+    accounting, because budget can be consumed between admission and execution
+    by runs already in flight. The point here is not correctness -- that is
+    already handled -- but cost: without this check a run whose outcome is
+    already determined still pays for a full durable traversal (API transaction
+    with advisory lock and three inserts, an outbox row, a dispatcher poll and
+    confirmed AMQP publish, a worker claim with row lock, attempt row and
+    lease) before anyone discovers it cannot run (PERF-004).
+
+    The caller already holds both identity locks, so the counters read here
+    cannot move underneath this transaction.
+    """
+
+    window = _current_window(await _epoch_now(session), limits.window_seconds)
+    for scope, limit in (
+        (f"p:{principal}", limits.principal_calls),
+        (f"t:{tenant}", limits.tenant_calls),
+    ):
+        row = await session.get(ProviderQuota, scope)
+        # A missing row, or one from an earlier window, means nothing is spent
+        # yet: charge_provider_call() resets `used` when the window rolls over.
+        if row is None or row.window_start != window:
+            continue
+        if row.used >= limit:
+            get_runtime_metrics().security_event("quota", "denied")
+            raise QuotaExceededError("Provider-call quota exceeded")
+
+
 async def check_admission(
     session: AsyncSession, principal: str, tenant: str, limits: QuotaLimits
 ) -> None:
@@ -60,14 +101,14 @@ async def check_admission(
         )
         if int(count or 0) >= limit:
             raise QuotaExceededError("Active work quota exceeded")
+    await check_provider_budget(session, principal, tenant, limits)
 
 
 async def charge_provider_call(
     session: AsyncSession, principal: str, tenant: str, limits: QuotaLimits
 ) -> None:
     await lock_identity(session, principal, tenant)
-    now = int(await session.scalar(select(func.extract("epoch", func.clock_timestamp()))) or 0)
-    window = now // limits.window_seconds * limits.window_seconds
+    window = _current_window(await _epoch_now(session), limits.window_seconds)
     rows = []
     for scope, limit in (
         (f"p:{principal}", limits.principal_calls),

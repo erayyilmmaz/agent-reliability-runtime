@@ -206,16 +206,24 @@ async def test_durable_evaluation_regression_jobs_and_provider_budget():
                 "/v1/evaluation-regressions", headers=job_headers, json=regression_payload()
             )
             assert duplicate.json()["job_id"] == regression_id and duplicate.json()["replayed"]
+            # PERF-004: the budget is provably spent here (provider.calls == 5 ==
+            # principal_provider_calls), so admission now rejects synchronously
+            # rather than creating a durable job whose only possible outcome is
+            # failure. Previously this returned 202 and the caller had to poll
+            # the status URL to discover RESOURCE_QUOTA_EXCEEDED.
+            #
+            # The execution-time charge still guards the partial case, where a
+            # job passes admission and exhausts the budget part-way through.
+            # That path is covered by test_atomic_provider_quota_races.
             blocked = client.post(
                 "/v1/evaluation-regressions",
                 headers={**headers, "Idempotency-Key": "regression-job-0002"},
                 json=regression_payload(),
             )
-            await process(blocked.json()["job_id"])
-            assert (
-                client.get(blocked.json()["status_url"], headers=headers).json()["error_code"]
-                == "RESOURCE_QUOTA_EXCEEDED"
-            )
+            assert blocked.status_code == 429
+            assert blocked.json()["error"]["code"] == "RESOURCE_QUOTA_EXCEEDED"
+            assert int(blocked.headers["Retry-After"]) == settings.quota_window_seconds
+            assert "job_id" not in blocked.json()
             assert provider.calls == 5
             assert (
                 client.post(
@@ -513,3 +521,91 @@ def test_regression_server_budget_rejects_before_job_admission():
             headers={"X-API-Key": keys[0], "Idempotency-Key": "too-many-calls-01"},
         )
         assert response.status_code == 422
+
+
+async def test_exhausted_provider_budget_is_rejected_at_admission_not_at_the_worker():
+    """PERF-004: a run that cannot execute must not traverse the durable pipeline.
+
+    Before this check, the provider-call budget was only charged inside the
+    worker's execution transaction. A run over budget was still accepted with
+    202 and still consumed an API transaction, an outbox row, an AMQP publish,
+    a worker claim, an attempt row and a lease before being marked FAILED. In
+    the performance audit that path accounted for 1,925 of 2,058 runs.
+    """
+    settings, keys, records = profile(principal_provider_calls=2)
+    engine = create_database_engine(settings)
+    factory = create_session_factory(engine)
+    limits = QuotaLimits.from_settings(settings)
+    principal, tenant = records[0].principal_id, records[0].tenant_id
+
+    try:
+        # Spend the principal's entire provider budget.
+        async with factory() as session:
+            async with session.begin():
+                for _ in range(limits.principal_calls):
+                    await charge_provider_call(session, principal, tenant, limits)
+
+        async def counts() -> tuple[int, int, int]:
+            async with factory() as session:
+                runs = await session.scalar(
+                    select(func.count()).select_from(Run).where(Run.principal_id == principal)
+                )
+                outbox = await session.scalar(select(func.count()).select_from(OutboxEvent))
+                attempts = await session.scalar(select(func.count()).select_from(RunAttempt))
+                return int(runs or 0), int(outbox or 0), int(attempts or 0)
+
+        before = await counts()
+
+        with TestClient(create_app(settings)) as client:
+            response = client.post(
+                "/v1/runs",
+                headers={"X-API-Key": keys[0], "Idempotency-Key": f"perf004-{uuid4().hex}"},
+                json={"input": {"prompt": "over budget"}},
+            )
+
+        # Rejected synchronously, with the header a client needs to back off.
+        assert response.status_code == 429
+        assert response.json()["error"]["code"] == "RESOURCE_QUOTA_EXCEEDED"
+        assert int(response.headers["Retry-After"]) == settings.quota_window_seconds
+
+        # And nothing durable was produced: no run, no outbox event, no attempt.
+        assert await counts() == before
+    finally:
+        await engine.dispose()
+
+
+async def test_admission_budget_check_does_not_consume_budget():
+    """The admission check is advisory; charge_provider_call stays authoritative.
+
+    If admission also charged, an accepted run would be billed twice - once on
+    the way in and once at execution.
+    """
+    settings, keys, records = profile(principal_provider_calls=10)
+    engine = create_database_engine(settings)
+    factory = create_session_factory(engine)
+    principal = records[0].principal_id
+
+    async def used() -> int:
+        async with factory() as session:
+            row = await session.get(ProviderQuota, f"p:{principal}")
+            return 0 if row is None else row.used
+
+    try:
+        assert await used() == 0
+
+        with TestClient(create_app(settings)) as client:
+            for index in range(3):
+                accepted = client.post(
+                    "/v1/runs",
+                    headers={
+                        "X-API-Key": keys[0],
+                        "Idempotency-Key": f"perf004b-{index}-{uuid4().hex}",
+                    },
+                    json={"input": {"prompt": "within budget"}},
+                )
+                assert accepted.status_code == 202
+
+        # Admission read the counter; only execution may move it.
+        assert await used() == 0
+    finally:
+        await engine.dispose()
