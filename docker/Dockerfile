@@ -16,6 +16,16 @@ RUN groupadd --system --gid 10001 runtime \
        --shell /usr/sbin/nologin runtime
 
 COPY --from=ghcr.io/astral-sh/uv:0.6.3@sha256:8257f3d17fd04794feaf89d83b4ccca3b2eaa5501de9399fa53929843c0a5b55 /uv /uvx /bin/
+
+# uv manages the virtualenv, so the interpreter's bundled pip is never used at
+# build or run time. It is removed because its vendored copies of msgpack and
+# setuptools are what the image scanner reports, and shipping unreachable
+# vulnerable code is still shipping vulnerable code.
+RUN python -m pip uninstall --yes pip \
+    && rm -rf /usr/local/lib/python*/site-packages/pip \
+              /usr/local/lib/python*/site-packages/pip-*.dist-info \
+              /usr/local/bin/pip /usr/local/bin/pip3*
+
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
