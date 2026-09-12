@@ -17,12 +17,47 @@ the credential registry. No raw API keys belong in the runtime registry.
 
 Keys have the form `arr_<random key ID>.<256-bit random secret>`. Provisioning
 uses `secrets.token_urlsafe(32)`; caller-selected passwords are not supported.
-Verification uses domain-separated HMAC peppering and PBKDF2-HMAC-SHA256 with
-600,000 iterations, a fresh 128-bit salt, and constant-time comparison. The
-work factor follows the [OWASP PBKDF2 guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).
+Verification uses domain-separated HMAC-SHA256 over the deployment pepper, a
+fresh 128-bit per-credential salt, and constant-time comparison.
+
+### Why HMAC and not a stretching KDF
+
+The secret being verified is **256 bits from a CSPRNG**, never a
+human-chosen password. Key stretching exists to make offline *guessing*
+expensive; at 256 bits there is no guessing surface to defend, so iteration
+count buys no security here. The pepper does the real work: an attacker holding
+only the registry cannot derive a verifier, and HMAC is not invertible, so
+holding both the registry and the pepper still reveals no key.
+
+Earlier builds used PBKDF2-HMAC-SHA256 at 600,000 iterations, following the
+[OWASP password-storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).
+That guidance is written for passwords and does not apply to random keys. The
+measured cost was **61-91 ms of CPU on every authenticated request**, which made
+it the system's capacity ceiling — see PERF-001 in
+[the performance audit](../performance-audit.md). This change removes that cost
+without weakening the property SEC-010 established.
+
+**If your deployment ever accepts caller-chosen keys, this reasoning does not
+hold and a stretching KDF is required.** The runtime does not support them:
+`KEY_PATTERN` rejects anything that is not a generated key.
+
+### Scheme migration
+
+`CredentialRecord.scheme` selects the verifier:
+
+| Scheme | Status |
+| ------ | ------ |
+| `hmac-sha256-v1` | Default. Issued by `agent-runtime-credential` |
+| `pbkdf2-sha256-v1` | Still verified, never issued |
+
+Registries provisioned before this change keep working unchanged — they are
+simply slow to verify. A mixed registry is valid, so credentials rotate one at
+a time with no downtime. Re-issue at your normal rotation interval; there is no
+forced migration.
+
 Verification runs in the bounded worker thread pool instead of blocking the
 ASGI event loop. Apply ingress abuse controls for unauthenticated traffic;
-principal rate limiting runs after authentication, not before KDF work.
+principal rate limiting runs after authentication.
 
 The verified tenant supplies the existing `runs.client_id` ownership column
 and its idempotency scope. All run/history/evaluation/replay operations use

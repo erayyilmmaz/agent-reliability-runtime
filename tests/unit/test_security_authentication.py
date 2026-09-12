@@ -134,3 +134,85 @@ def test_provisioning_cli_round_trip(
         credential_cli()
     assert error.value.code == 2
     assert capsys.readouterr().out == ""
+
+
+# --- PERF-001: verification scheme -----------------------------------------
+
+
+def _legacy_pbkdf2_record(principal: str, tenant: str) -> tuple[str, dict[str, object]]:
+    """Build a registry entry exactly as it was issued before PERF-001."""
+    raw_key, record = issue_credential(principal_id=principal, tenant_id=tenant, pepper=PEPPER)
+    entry = registry_entry(record)
+    entry["scheme"] = credentials.PBKDF2_SCHEME
+    entry["verifier"] = credentials.derive_verifier(
+        raw_key,
+        salt=record.salt,
+        pepper=PEPPER,
+        scheme=credentials.PBKDF2_SCHEME,
+    )
+    return raw_key, entry
+
+
+def test_new_credentials_are_issued_with_the_hmac_scheme() -> None:
+    _, record = issue_credential(principal_id="bob", tenant_id="tenant-b", pepper=PEPPER)
+    assert record.scheme == credentials.HMAC_SCHEME
+    assert credentials.DEFAULT_SCHEME == credentials.HMAC_SCHEME
+
+
+def test_pbkdf2_registries_issued_before_perf_001_still_authenticate() -> None:
+    """A registry in the old scheme must keep working without re-issuing keys."""
+    legacy_key, legacy_entry = _legacy_pbkdf2_record("carol", "tenant-c")
+
+    result = authenticate(settings_for(legacy_entry), legacy_key)
+
+    assert result.authenticated
+    assert (result.principal_id, result.tenant_id) == ("carol", "tenant-c")
+
+
+def test_both_schemes_coexist_in_one_registry() -> None:
+    """Rotation happens per credential, so a registry is mixed while it runs."""
+    legacy_key, legacy_entry = _legacy_pbkdf2_record("dave", "tenant-d")
+    modern_key, modern = issue_credential(principal_id="erin", tenant_id="tenant-e", pepper=PEPPER)
+    settings = settings_for(legacy_entry, registry_entry(modern))
+
+    assert authenticate(settings, legacy_key).principal_id == "dave"
+    assert authenticate(settings, modern_key).principal_id == "erin"
+
+
+def test_a_key_never_verifies_under_the_wrong_scheme() -> None:
+    """Domain separation: the two schemes must not accept each other's digests."""
+    raw_key, record = issue_credential(principal_id="frank", tenant_id="tenant-f", pepper=PEPPER)
+    hmac_digest = record.verifier.get_secret_value()
+    pbkdf2_digest = credentials.derive_verifier(
+        raw_key, salt=record.salt, pepper=PEPPER, scheme=credentials.PBKDF2_SCHEME
+    )
+
+    assert hmac_digest != pbkdf2_digest
+
+    mislabelled = registry_entry(record)
+    mislabelled["scheme"] = credentials.PBKDF2_SCHEME
+    assert not authenticate(settings_for(mislabelled), raw_key).authenticated
+
+
+def test_verifier_still_depends_on_pepper_and_salt() -> None:
+    """HMAC removes stretching, not the secret inputs the verifier is bound to."""
+    raw_key, record = issue_credential(principal_id="gina", tenant_id="tenant-g", pepper=PEPPER)
+    stored = record.verifier.get_secret_value()
+
+    other_pepper = credentials.derive_verifier(raw_key, salt=record.salt, pepper="z" * 48)
+    other_salt = credentials.derive_verifier(raw_key, salt="0" * 32, pepper=PEPPER)
+
+    assert stored != other_pepper
+    assert stored != other_salt
+    wrong_pepper = settings_for(registry_entry(record), pepper="z" * 48)
+    assert not authenticate(wrong_pepper, raw_key).authenticated
+
+
+def test_unknown_scheme_is_rejected_rather_than_defaulted() -> None:
+    with pytest.raises(ValueError, match="Unsupported credential scheme"):
+        credentials.derive_verifier("arr_x.y", salt="0" * 32, pepper=PEPPER, scheme="md5-v1")
+
+    entry = registry_entry(issue_credential(principal_id="h", tenant_id="t", pepper=PEPPER)[1])
+    entry["scheme"] = "md5-v1"
+    with pytest.raises(ValidationError):
+        settings_for(entry)

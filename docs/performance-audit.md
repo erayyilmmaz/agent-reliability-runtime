@@ -1,7 +1,7 @@
 # Performance & Scalability Audit
 
 **Target:** Agent Reliability Runtime (`agent-reliability-runtime` v0.1.0)
-**Revision:** `743a714` (branch `main`)
+**Revision:** `743a714` (branch `main`) — PERF-001 remediated, see its Resolved block
 **Date:** 2026-09-12
 **Type:** Measurement-driven performance and scalability audit
 **Method:** Measure → Analyze → Diagnose → Prioritize → Recommend
@@ -14,14 +14,14 @@
 | Area | Result |
 | ---- | ------ |
 | **Overall performance health** | **Constrained by one control, otherwise efficient** |
-| **Main bottleneck** | Per-request PBKDF2 credential verification (600,000 iterations) |
+| **Main bottleneck** | ~~Per-request PBKDF2 credential verification~~ → **resolved**; now a single-core API event loop |
 | **Current capacity** | ~71 RPS reads / ~53 RPS submits, single API replica, 10 cores |
 | **Primary latency source** | Authentication — 92% of an authenticated read's wall time |
 | **Primary memory risk** | None found. +1.5 MiB under load, full recovery |
 | **Primary DB risk** | Unbounded, unindexed `security_audit_events`; 2 writes per read |
 | **Primary frontend risk** | **Not applicable** — JSON API only, no frontend exists |
 | **Scalability risk** | CPU-bound per request; horizontal scaling works but is expensive |
-| **Highest priority fix** | Move credential verification off the per-request path (PERF-001) |
+| **Highest priority fix** | ~~PERF-001~~ **done**. Next: multi-process/replica scaling, then PERF-004 |
 
 ### The one-paragraph version
 
@@ -568,6 +568,59 @@ CPU per request ~120 ms → <10 ms, which changes the cost of running the servic
 **Effort:** Low (option 1/2) / Medium (option 3) | **Risk:** Medium — touches
 the authentication path; requires the SEC-E1 test suite to pass unchanged
 | **Priority:** **P0**
+
+#### ✅ Resolved — option 1 implemented
+
+`hmac-sha256-v1` is now the default verification scheme.
+`pbkdf2-sha256-v1` remains verifiable, so existing registries keep working and
+credentials rotate one at a time.
+
+**Verifier cost, same host, same benchmark:**
+
+| Scheme | Median | Single-core ceiling |
+| ------ | -----: | ------------------: |
+| `pbkdf2-sha256-v1` | 91.263 ms | 11 auth/s |
+| `hmac-sha256-v1` | **0.0011 ms** | ~923,000 auth/s |
+
+**End-to-end, authenticated `GET /v1/runs/{id}`**, clean volumes, identical
+scenario, 2 repeats × 30 s per level:
+
+| VUs | RPS before | RPS after | p50 before | p50 after | p95 before | p95 after |
+| --: | ---------: | --------: | ---------: | --------: | ---------: | --------: |
+| 1 | 14.6 | **424** | 66.0 ms | **2.2 ms** | 72.8 ms | 2.8 ms |
+| 5 | 52.2 | **~500** | 93.7 ms | 9.5 ms | 111.5 ms | 13.8 ms |
+| 10 | 71.0 | ~178 | 132.8 ms | 52.5 ms | 186.5 ms | 106.2 ms |
+| 25 | 61.3 | ~320 | 399.4 ms | 73.6 ms | 688.2 ms | 119.8 ms |
+| 50 | 56.1 | ~380 | 839.4 ms | 121.0 ms | 1,467.9 ms | 235.5 ms |
+
+Error rate 0.0% at every level. Single-VU latency improved **30×**; peak
+throughput improved roughly **7×**.
+
+**The bottleneck moved, as §22 predicted it would.** Two consequences were
+measured rather than assumed:
+
+1. **The rate limiter became binding first.** The initial post-fix sweep showed
+   24-100% errors: with the KDF gone, traffic exceeded
+   `APP_RATE_LIMIT_REQUESTS=10000 / 60 s` (~166 RPS) and the API correctly
+   returned `429`. Redis showed the counter at 9,651/10,000. This is PERF-008
+   behaving exactly as designed — the numbers above were re-measured with
+   `ARR_PERF_RATE_WINDOW=1` so the sweep measures service time, not admission.
+2. **The new ceiling is one CPU core, not the connection pool.** Under load the
+   API container sits at **~103% CPU** — a single saturated core — where it
+   previously sat at ~850% (the KDF parallelised across the threadpool). Meanwhile
+   PostgreSQL is at ~32%, Redis at ~1%, and only 1-2 of 11-12 pooled connections
+   are active. k6 itself used ~10% CPU, so the generator is not the constraint.
+
+   PERF-009 predicted the pool would bind next. **That prediction was wrong**:
+   the pool is nowhere near exhausted. The constraint is that a single uvicorn
+   process runs one asyncio event loop on one core. Scaling past ~500 RPS per
+   replica needs more processes or more replicas, not a larger pool.
+
+   The reproducible dip at 10 VUs (178 RPS across two runs, against ~500 at 5 VUs
+   and ~320 at 25) is **unexplained**. The system is single-core saturated across
+   10-50 VUs, so the variation reflects event-loop and host scheduling rather
+   than a capacity change — but that is an observation, not a verified mechanism,
+   and it is left open.
 
 ---
 

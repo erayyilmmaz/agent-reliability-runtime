@@ -43,7 +43,9 @@ def authenticate_api_key(
     pepper = settings.auth_pepper
     if pepper is None:
         raise RuntimeError("API-key authentication has no credential pepper")
-    verifier = derive_verifier(raw_key, salt=record.salt, pepper=pepper.get_secret_value())
+    verifier = derive_verifier(
+        raw_key, salt=record.salt, pepper=pepper.get_secret_value(), scheme=record.scheme
+    )
     if not hmac.compare_digest(verifier, record.verifier.get_secret_value()):
         return AuthenticationResult(False, None, "INVALID_CREDENTIAL")
     # This identifies the registry record, and cannot be used as a credential verifier.
