@@ -360,6 +360,26 @@ otherwise grows with read traffic without bound. It is operator tooling: off
 unless `APP_AUDIT_RETENTION_DAYS` is set, dry-run by default, and it needs the
 DDL credential.
 
+## Released image
+
+```bash
+docker pull ghcr.io/erayyilmmaz/agent-reliability-runtime:0.1.0
+```
+
+Published by tag only, addressed by digest, with a SLSA build provenance
+attestation and a CycloneDX SBOM signed through the release workflow's OIDC
+identity (SEC-SC-01). Verify before running it:
+
+```bash
+gh attestation verify oci://ghcr.io/erayyilmmaz/agent-reliability-runtime:0.1.0 \
+  --owner erayyilmmaz
+```
+
+That checks the SLSA provenance — it confirms the image was built by this
+repository's workflow at `refs/tags/v0.1.0`, not merely that it carries the
+right name. Add `--predicate-type https://cyclonedx.org/bom` to verify the SBOM
+attestation instead.
+
 ## Delivery checks
 
 The GitHub Actions workflow runs locked dependency installation, Ruff, mypy,
