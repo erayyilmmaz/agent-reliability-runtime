@@ -325,9 +325,13 @@ context, sanitized exception diagnostics, and security alert rules. Deterministi
 provider echo is now **off by default**; operator-only
 `APP_DETERMINISTIC_ECHO_INPUT=true` enables input echo, never policy echo.
 See [audit, telemetry and data-protection contract](docs/security/audit-telemetry-data.md).
-The tenant envelope-encryption/retention adapter is a tested **prototype**, not
-automatic encryption of existing run data; production KMS and runtime read/write
-binding remain a separate rollout gate, as agreed for this step.
+The tenant envelope-encryption/retention adapter is a tested **prototype**. To be
+unambiguous: run payloads are stored as plain JSONB and nothing in the runtime
+encrypts them — protection at rest depends on the database's own disk
+encryption, which this repository does not provision. SEC-022 is closed as a
+deliberate deferral; the entry criteria for lifting it are written out under
+"Production gate" in
+[audit, telemetry and data protection](docs/security/audit-telemetry-data.md).
 
 ## Performance and capacity
 

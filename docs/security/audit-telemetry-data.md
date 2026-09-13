@@ -116,6 +116,35 @@ reachability does not prove every application's exporter is healthy.
 
 ## Data minimization and encryption prototype — SEC-022
 
+> **Status: closed as a deliberate deferral, not as remediated.**
+>
+> **What is true today.** `runs.input_payload` and `runs.result_payload` are
+> plain JSONB. Nothing in the runtime encrypts them. Verified rather than
+> assumed: `agent_runtime.security.envelope` is imported only by
+> `retention_cli.py` (tenant-key erasure) and by tests — no API, worker,
+> dispatcher or scheduler path calls it. Protection of data at rest therefore
+> depends entirely on the database's own disk encryption, which this repository
+> does not provision.
+>
+> **What shipped.** The input-minimization half is real and active: the
+> deterministic provider no longer echoes prompts by default, and
+> `policy_snapshot` is never copied into results. The encryption half shipped as
+> a *tested prototype* — `KeyWrapper`/`LocalKeyWrapper`/`TenantEnvelope`, a
+> per-tenant wrapped DEK, and an erasure path with tombstones — so that binding a
+> real key service later is a swap behind an interface rather than a redesign.
+>
+> **Why it is deferred rather than finished.** Binding it needs a key-management
+> service, credentials and encrypted infrastructure that live outside this
+> repository, plus decisions (retention duration, legal holds, erasure scope)
+> that are not engineering calls. Shipping application-level encryption without
+> those would produce a compliance claim this repository cannot support — which
+> is worse than plaintext that is honestly labelled.
+>
+> **Do not** manually encrypt live runtime rows with the prototype: the workers
+> do not decrypt those envelopes, so the run would fail. The five conditions
+> under "Production gate" below are the entry criteria for lifting this.
+
+
 The deterministic provider returns only `{"accepted": true}` unless the operator
 sets `APP_DETERMINISTIC_ECHO_INPUT=true`. Caller policy cannot enable echo. Even
 opt-in mode never copies `policy_snapshot` into the result. The sample regression

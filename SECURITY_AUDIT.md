@@ -28,9 +28,17 @@
 >
 > - **SEC-SC-02 was a false positive.** The Terraform provider binaries were
 >   never committed — see §6 of [`docs/security/supply-chain.md`](docs/security/supply-chain.md).
-> - **SEC-022 is partially remediated.** Input minimization and the
->   encryption/crypto-shredding design and interface are in place; binding it to
->   a production key-management service is a deliberate deferral.
+> - **SEC-022 is partially remediated, and closed as a deliberate deferral.**
+>   Input minimization is active. The encryption/crypto-shredding design and
+>   interface are in place and tested, but **nothing in the runtime encrypts
+>   payloads** — `runs.input_payload` and `runs.result_payload` are plain JSONB,
+>   and the envelope adapter is reachable only from the erasure CLI and tests.
+>   Data at rest depends on the database's own disk encryption, which this
+>   repository does not provision. Binding a production key-management service
+>   needs credentials, encrypted infrastructure and retention/legal-hold
+>   decisions that live outside this repository; the entry criteria are written
+>   out under "Production gate" in
+>   [`docs/security/audit-telemetry-data.md`](docs/security/audit-telemetry-data.md).
 >
 > ### Security-relevant changes made *after* remediation
 >
