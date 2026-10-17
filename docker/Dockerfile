@@ -1,7 +1,7 @@
 # SEC-016: pinned by multi-arch index digest so two builds of the same commit
 # resolve identical base layers. Update the digest and the comment together.
 #   docker buildx imagetools inspect python:3.12-slim --format '{{.Manifest.Digest}}'
-FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
+FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
